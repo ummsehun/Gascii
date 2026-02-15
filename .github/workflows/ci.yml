@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libopencv-dev clang libclang-dev build-essential lz4 libasound2-dev
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=$(find /usr/lib -name 'libclang.so' -printf '%h' -quit)" >> $GITHUB_ENV
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+      - name: Build
+        run: cargo build --release --verbose
+      - name: Test
+        run: cargo test --verbose
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bad_apple-linux
+          path: target/release/bad_apple
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM and Clang
+        run: choco install llvm
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+      - name: Install vcpkg and OpenCV
+        shell: powershell
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git $env:RUNNER_WORKSPACE\vcpkg
+          & $env:RUNNER_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
+          & $env:RUNNER_WORKSPACE\vcpkg\vcpkg.exe install opencv4[contrib]:x64-windows
+          echo "VCPKG_ROOT=$env:RUNNER_WORKSPACE\vcpkg" >> $env:GITHUB_ENV
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+      - name: Build
+        run: cargo build --release --verbose
+      - name: Test
+        run: cargo test --verbose
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bad_apple-windows
+          path: target/release/bad_apple.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Homebrew deps
+        run: |
+          brew update
+          brew install opencv lz4 pkg-config
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+      - name: Build
+        run: cargo build --release --verbose
+      - name: Test
+        run: cargo test --verbose
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bad_apple-macos
+          path: target/release/bad_apple
+
+  release:
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/bad_apple-linux/bad_apple
+            artifacts/bad_apple-windows/bad_apple.exe
+            artifacts/bad_apple-macos/bad_apple

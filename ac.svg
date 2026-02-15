@@ -1,0 +1,255 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" style="background-color: #ffffff;">
+  <defs>
+    <!-- Standard Arrowhead -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333333"/>
+    </marker>
+    <!-- Hollow Arrowhead for Data Flow -->
+    <marker id="arrow-hollow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ffffff" stroke="#333333" stroke-width="1"/>
+    </marker>
+    
+    <!-- Drop Shadow Filter -->
+    <filter id="ds" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+      <feOffset dx="2" dy="2" result="offsetblur"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.2"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Title Section -->
+  <text x="600" y="50" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="36" font-weight="bold" fill="#333">Gascii System Architecture</text>
+  <text x="600" y="85" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="20" fill="#666">Multi-Threaded Terminal Video Player</text>
+
+  <!-- ==================== GROUP: DECODER THREAD ==================== -->
+  <g transform="translate(40, 120)">
+    <!-- Container -->
+    <rect x="0" y="0" width="300" height="720" rx="8" ry="8" fill="#f5f9ff" stroke="#6c8ebf" stroke-width="3" stroke-dasharray="8,8"/>
+    <path d="M 0 40 L 300 40" stroke="#6c8ebf" stroke-width="2"/>
+    <text x="150" y="28" text-anchor="middle" font-family="Helvetica" font-size="16" font-weight="bold" fill="#333">DECODER THREAD (Producer)</text>
+
+    <!-- Node: Video Input -->
+    <g transform="translate(50, 70)">
+      <path d="M 0 0 L 180 0 L 200 20 L 200 50 L 0 50 Z" fill="#ffffff" stroke="#333" stroke-width="2" filter="url(#ds)"/>
+      <path d="M 180 0 L 180 20 L 200 20" fill="none" stroke="#333" stroke-width="2"/>
+      <text x="100" y="32" text-anchor="middle" font-family="Helvetica" font-size="16">Video File (.mp4)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 150 120 L 150 150" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: OpenCV Decode -->
+    <g transform="translate(50, 150)">
+      <rect x="0" y="0" width="200" height="70" rx="4" fill="#dae8fc" stroke="#6c8ebf" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="30" text-anchor="middle" font-family="Helvetica" font-size="18" font-weight="bold">VideoDecoder</text>
+      <text x="100" y="55" text-anchor="middle" font-family="Helvetica" font-size="14" fill="#444">capture.read() (BGR)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 150 220 L 150 250" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: SIMD Resize -->
+    <g transform="translate(50, 250)">
+      <rect x="0" y="0" width="200" height="90" rx="4" fill="#dae8fc" stroke="#6c8ebf" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="30" text-anchor="middle" font-family="Helvetica" font-size="18" font-weight="bold">SIMD Resize</text>
+      <text x="100" y="55" text-anchor="middle" font-family="Helvetica" font-size="14" fill="#444">fast_image_resize</text>
+      <text x="100" y="78" text-anchor="middle" font-family="Helvetica" font-size="14" fill="#d74b4b">[AVX2/NEON]</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 150 340 L 150 370" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: Letterbox -->
+    <g transform="translate(50, 370)">
+      <rect x="0" y="0" width="200" height="60" rx="4" fill="#ffffff" stroke="#333" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="35" text-anchor="middle" font-family="Helvetica" font-size="16">Letterbox / Crop</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 150 430 L 150 460" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: Arc Wrap -->
+    <g transform="translate(50, 460)">
+      <rect x="0" y="0" width="200" height="60" rx="4" fill="#ffffff" stroke="#333" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="37" text-anchor="middle" font-family="Courier New" font-size="16" font-weight="bold">Arc&lt;Vec&lt;u8&gt;&gt;</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 150 520 L 150 550" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: Queue Push -->
+    <g transform="translate(50, 550)">
+      <rect x="0" y="0" width="200" height="60" rx="30" fill="#d5e8d4" stroke="#82b366" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="37" text-anchor="middle" font-family="Helvetica" font-size="18" font-weight="bold">Queue.push()</text>
+    </g>
+  </g>
+
+  <!-- ==================== CHANNEL / BUFFER ==================== -->
+  <g transform="translate(380, 300)">
+    <!-- Cylinder Shape -->
+    <path d="M 0 30 L 0 220 C 0 250 140 250 140 220 L 140 30 C 140 60 0 60 0 30" fill="#e1d5e7" stroke="#9673a6" stroke-width="2" filter="url(#ds)"/>
+    <ellipse cx="70" cy="30" rx="70" ry="15" fill="#f0ebf5" stroke="#9673a6" stroke-width="2"/>
+    
+    <text x="70" y="100" text-anchor="middle" font-family="Helvetica" font-size="18" font-weight="bold" fill="#333">Ring Buffer</text>
+    <text x="70" y="130" text-anchor="middle" font-family="Helvetica" font-size="16" fill="#666">Crossbeam Channel</text>
+    <text x="70" y="160" text-anchor="middle" font-family="Helvetica" font-size="14" fill="#444">Capacity: 120 Frames</text>
+    <text x="70" y="185" text-anchor="middle" font-family="Helvetica" font-size="14" fill="#444">Size: ~12 MB</text>
+  </g>
+
+  <!-- Connector: Decoder -> Buffer -->
+  <path d="M 240 700 L 450 700 L 450 550" fill="none" stroke="#6c8ebf" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <!-- ==================== GROUP: MAIN THREAD ==================== -->
+  <g transform="translate(560, 120)">
+    <!-- Container -->
+    <rect x="0" y="0" width="380" height="720" rx="8" ry="8" fill="#fcf7f9" stroke="#b85450" stroke-width="3" stroke-dasharray="8,8"/>
+    <path d="M 0 40 L 380 40" stroke="#b85450" stroke-width="2"/>
+    <text x="190" y="28" text-anchor="middle" font-family="Helvetica" font-size="16" font-weight="bold" fill="#333">MAIN THREAD (Consumer)</text>
+
+    <!-- Node: Input Poll -->
+    <g transform="translate(90, 60)">
+      <rect x="0" y="0" width="200" height="50" rx="4" fill="#ffffff" stroke="#333" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="32" text-anchor="middle" font-family="Helvetica" font-size="16">Event Poll (Input)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 190 110 L 190 130" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: Pop Frame -->
+    <g transform="translate(90, 130)">
+      <rect x="0" y="0" width="200" height="50" rx="4" fill="#d5e8d4" stroke="#82b366" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="32" text-anchor="middle" font-family="Helvetica" font-size="18" font-weight="bold">Pop Frame</text>
+    </g>
+
+    <!-- Connector: Buffer -> Pop -->
+    <path d="M -40 300 L -20 300 L -20 155 L 90 155" fill="none" stroke="#82b366" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <!-- Arrow -->
+    <path d="M 190 180 L 190 210" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Diamond: Sync Check -->
+    <g transform="translate(190, 245)">
+      <path d="M 0 -35 L 70 0 L 0 35 L -70 0 Z" fill="#fff2cc" stroke="#d6b656" stroke-width="2" filter="url(#ds)"/>
+      <text x="0" y="6" text-anchor="middle" font-family="Helvetica" font-size="14" font-weight="bold">Sync?</text>
+    </g>
+    <!-- Sync Labels -->
+    <text x="280" y="235" font-family="Helvetica" font-size="14" fill="#d74b4b">Slow (Drop)</text>
+    <text x="280" y="260" font-family="Helvetica" font-size="14" fill="#0066cc">Fast (Wait)</text>
+
+    <!-- Arrow -->
+    <path d="M 190 280 L 190 310" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: Frame Processor (Rayon) -->
+    <g transform="translate(40, 310)">
+      <rect x="0" y="0" width="300" height="140" rx="4" fill="#ffe6cc" stroke="#d79b00" stroke-width="2" filter="url(#ds)"/>
+      <text x="150" y="28" text-anchor="middle" font-family="Helvetica" font-size="16" font-weight="bold">FrameProcessor (Rayon)</text>
+      
+      <!-- Internal Cores -->
+      <g transform="translate(20, 45)">
+        <rect x="0" y="0" width="60" height="40" fill="#fff" stroke="#d79b00" rx="2"/>
+        <text x="30" y="25" text-anchor="middle" font-size="12">Core 1</text>
+      </g>
+      <g transform="translate(86, 45)">
+        <rect x="0" y="0" width="60" height="40" fill="#fff" stroke="#d79b00" rx="2"/>
+        <text x="30" y="25" text-anchor="middle" font-size="12">Core 2</text>
+      </g>
+      <g transform="translate(153, 45)">
+        <rect x="0" y="0" width="60" height="40" fill="#fff" stroke="#d79b00" rx="2"/>
+        <text x="30" y="25" text-anchor="middle" font-size="12">Core 3</text>
+      </g>
+      <g transform="translate(220, 45)">
+        <rect x="0" y="0" width="60" height="40" fill="#fff" stroke="#d79b00" rx="2"/>
+        <text x="30" y="25" text-anchor="middle" font-size="12">Core 4</text>
+      </g>
+      
+      <text x="150" y="110" text-anchor="middle" font-family="Helvetica" font-size="14" font-weight="bold">Algorithm: Half-Block ('▀')</text>
+      <text x="150" y="130" text-anchor="middle" font-family="Helvetica" font-size="12" fill="#555">Parallel RGB to ANSI Conversion</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 190 450 L 190 480" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: Diff Renderer -->
+    <g transform="translate(90, 480)">
+      <rect x="0" y="0" width="200" height="60" rx="4" fill="#ffffff" stroke="#333" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="28" text-anchor="middle" font-family="Helvetica" font-size="16" font-weight="bold">Diff Renderer</text>
+      <text x="100" y="50" text-anchor="middle" font-family="Helvetica" font-size="14" fill="#555">Compare prev vs current</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 190 540 L 190 570" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: BufWriter -->
+    <g transform="translate(90, 570)">
+      <rect x="0" y="0" width="200" height="60" rx="4" fill="#ffffff" stroke="#333" stroke-width="2" filter="url(#ds)"/>
+      <text x="100" y="35" text-anchor="middle" font-family="Helvetica" font-size="16">BufWriter (4MB)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 190 630 L 190 650" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: Terminal -->
+    <g transform="translate(65, 650)">
+      <rect x="0" y="0" width="250" height="60" rx="6" fill="#333333" stroke="#000" stroke-width="2" filter="url(#ds)"/>
+      <text x="125" y="28" text-anchor="middle" font-family="Courier New" font-size="18" font-weight="bold" fill="#00ff00">STDOUT (Terminal)</text>
+      <text x="125" y="50" text-anchor="middle" font-family="Courier New" font-size="14" fill="#ccc">Display Output</text>
+    </g>
+  </g>
+
+  <!-- ==================== AUDIO PROCESS ==================== -->
+  <g transform="translate(960, 120)">
+    <!-- Container -->
+    <rect x="0" y="0" width="220" height="260" rx="8" ry="8" fill="#fff5f5" stroke="#b85450" stroke-width="3" stroke-dasharray="8,8"/>
+    <path d="M 0 40 L 220 40" stroke="#b85450" stroke-width="2"/>
+    <text x="110" y="28" text-anchor="middle" font-family="Helvetica" font-size="16" font-weight="bold" fill="#333">AUDIO (Process)</text>
+
+    <!-- Node: Audio File -->
+    <g transform="translate(35, 60)">
+      <path d="M 0 0 L 130 0 L 150 20 L 150 50 L 0 50 Z" fill="#ffffff" stroke="#333" stroke-width="2" filter="url(#ds)"/>
+      <path d="M 130 0 L 130 20 L 150 20" fill="none" stroke="#333" stroke-width="2"/>
+      <text x="75" y="32" text-anchor="middle" font-family="Helvetica" font-size="16">Audio File</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 110 110 L 110 140" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Node: ffplay -->
+    <g transform="translate(35, 140)">
+      <rect x="0" y="0" width="150" height="60" rx="4" fill="#333" stroke="#b85450" stroke-width="2" filter="url(#ds)"/>
+      <text x="75" y="37" text-anchor="middle" font-family="Courier New" font-size="18" font-weight="bold" fill="#ffcc00">ffplay</text>
+    </g>
+    
+    <!-- Sync line -->
+    <path d="M -20 170 L -180 170 L -180 210" fill="none" stroke="#d74b4b" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrow)"/>
+    <text x="-120" y="160" font-family="Helvetica" font-size="12" fill="#d74b4b">Sync Ref</text>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(960, 680)">
+    <rect x="0" y="0" width="220" height="160" rx="6" fill="#ffffff" stroke="#999" stroke-width="1"/>
+    <text x="110" y="25" text-anchor="middle" font-family="Helvetica" font-size="16" font-weight="bold">Legend</text>
+    
+    <!-- Producer -->
+    <rect x="25" y="45" width="30" height="15" fill="#f5f9ff" stroke="#6c8ebf"/>
+    <text x="65" y="58" font-family="Helvetica" font-size="14">Producer Thread</text>
+    
+    <!-- Consumer -->
+    <rect x="25" y="70" width="30" height="15" fill="#fcf7f9" stroke="#b85450"/>
+    <text x="65" y="83" font-family="Helvetica" font-size="14">Consumer Thread</text>
+    
+    <!-- Shared -->
+    <rect x="25" y="95" width="30" height="15" fill="#e1d5e7" stroke="#9673a6"/>
+    <text x="65" y="108" font-family="Helvetica" font-size="14">Shared Memory</text>
+    
+    <!-- Parallel -->
+    <rect x="25" y="120" width="30" height="15" fill="#ffe6cc" stroke="#d79b00"/>
+    <text x="65" y="133" font-family="Helvetica" font-size="14">Parallel Exec</text>
+  </g>
+
+</svg>

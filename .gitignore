@@ -1,0 +1,31 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+@build
+build/
+
+# Logs
+logs
+*.log
+
+
+
+/Cargo.lock
+/target
+/build
+
+# Assets
+/assets
+**assets
+*assets
+assets/
+assets/*
+assets/**
+
+
+# source
+/source

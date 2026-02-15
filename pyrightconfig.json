@@ -1,0 +1,16 @@
+{
+    "include": [
+        "scripts"
+    ],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__"
+    ],
+    "ignore": [
+        "scripts/extract_ascii_frames.py"
+    ],
+    "reportMissingImports": false,
+    "reportMissingTypeStubs": false,
+    "pythonVersion": "3.9",
+    "typeCheckingMode": "basic"
+} 
