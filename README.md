@@ -2,9 +2,11 @@
 
 High-performance C99 implementation of the famous Bad Apple animation in ASCII format, synchronized with audio playback in the terminal.
 
+> NOTE: `play.sh`는 제거되었습니다. 실행은 `cargo menu`를 사용하세요.
+
 ## ✨ Features
 
-- **One-Click Launch**: Single `play.sh` script handles everything automatically
+- **One-Command Launch**: `cargo menu` opens TUI and starts playback end-to-end
 - **Smart Setup**: Auto-detects dependencies, extracts frames, builds project
 - **MacBook Optimized**: Single window launch with perfect aspect ratio
 - **High Performance**: Optimized C99 code with multithreading
@@ -26,23 +28,13 @@ cd badApple
 # - bad_apple.wav in assets/ (optional - can be extracted from video)
 
 # One command does everything:
-./play.sh
+cargo menu
 ```
 
 ### Windows Users 🪟
-Windows에서는 bash 환경이 필요합니다:
+Windows에서도 동일하게 Rust/Cargo만 있으면 됩니다:
 ```batch
-# 1. 호환성 확인 (권장)
-check_windows.bat
-
-# 2. 배치 파일로 실행
-play.bat
-
-# 3. PowerShell 스크립트 사용
-powershell -ExecutionPolicy Bypass -File play.ps1
-
-# 4. Git Bash에서 직접 실행
-./play.sh --no-compile
+cargo menu
 ```
 
 ### Using Make
@@ -65,14 +57,11 @@ make run      # Run in current terminal
 
 ### Advanced Options
 ```bash
-# Force re-extract frames
-./play.sh --force-extract
+# Launch alias
+cargo play
 
-# Force rebuild
-./play.sh --force-build
-
-# Show help
-./play.sh --help
+# Direct command
+cargo run --release -- menu
 ```
 
 ## 📋 Prerequisites
@@ -387,20 +376,21 @@ check_windows.bat
 ```bash
 # 캐시 삭제 후 재시도
 rm -rf ~/.badapple_cache
-./play.sh
+cargo menu
 ```
 
 **문제: 오디오 동기화 문제**
 ```bash
 # 오디오 파일 재추출
 rm assets/bad_apple.wav
-./play.sh
+cargo menu
 ```
 
 **문제: 터미널 크기 감지 실패**
 ```bash
-# 수동 크기 지정
-./play.sh -w 120 -h 40
+# 터미널 크기 확인 후 재실행
+cargo run --release -- terminal-size
+cargo menu
 ```
 
 ## �📄 License

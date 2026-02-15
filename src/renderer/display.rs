@@ -3,12 +3,12 @@ use crossterm::{
     cursor,
     style::Print,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-    QueueableCommand,
     ExecutableCommand,
 };
-use std::io::{Stdout, Write, BufWriter};
+use std::io::{BufWriter, Stdout, Write};
 
 use super::cell::CellData;
+use crate::shared::constants;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum DisplayMode {
@@ -34,9 +34,9 @@ impl DisplayManager {
             last_cells: None,
             render_buffer: Vec::with_capacity(4 * 1024 * 1024), // Pre-allocate 4MB buffer
         };
-        
+
         dm.initialize_terminal()?;
-        
+
         Ok(dm)
     }
 
@@ -44,28 +44,30 @@ impl DisplayManager {
         terminal::enable_raw_mode()?;
         self.stdout.execute(EnterAlternateScreen)?;
         self.stdout.execute(cursor::Hide)?;
-        
+
         // Disable line wrapping (DECRAWM) to prevent scrolling at edges
         self.stdout.execute(Print("\x1b[?7l"))?;
-        
+
         // === STRONGER V-SYNC ENFORCEMENT ===
         // Enable synchronized updates mode (DECSM 2026)
         // This ensures terminal waits for complete frame before rendering
         self.stdout.execute(Print("\x1b[?2026h"))?;
-        
+
         // Disable cursor blinking (reduces screen tearing)
         self.stdout.execute(Print("\x1b[?12l"))?;
-        
+
         // Request high refresh rate mode if supported
         self.stdout.execute(Print("\x1b[?1049h"))?; // Alternative screen buffer
-        
+
         Ok(())
     }
 
     /// Return terminal size in character columns and rows, converting from pixels when needed.
     pub fn terminal_size_chars(&self) -> Result<(u16, u16)> {
         let (mut term_cols, mut term_rows) = terminal::size()?;
-        if let (Ok(cw_str), Ok(ch_str)) = (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT")) {
+        if let (Ok(cw_str), Ok(ch_str)) =
+            (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
+        {
             if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
                 if term_cols > cw * 16 {
                     term_cols = (term_cols / cw).max(1);
@@ -139,7 +141,7 @@ impl DisplayManager {
     // Optimized Diffing Renderer with Zero-Allocation
     pub fn render_diff(&mut self, cells: &[CellData], width: usize) -> Result<()> {
         let start_render = std::time::Instant::now();
-        
+
         // Reuse buffer
         self.render_buffer.clear();
         let buffer = &mut self.render_buffer;
@@ -150,28 +152,33 @@ impl DisplayManager {
         let mut force_redraw = false;
         if self.last_cells.as_ref().map(|v| v.len()).unwrap_or(0) != cells.len() {
             // Clear screen directly into buffer
-            buffer.extend_from_slice(b"\x1b[2J"); 
+            buffer.extend_from_slice(b"\x1b[2J");
             self.last_cells = Some(vec![CellData::default(); cells.len()]);
             force_redraw = true;
         }
 
         let last_cells = match &mut self.last_cells {
             Some(v) => v,
-            None => { return Ok(()); }
+            None => {
+                return Ok(());
+            }
         };
-        
+
         let mut last_fg: Option<(u8, u8, u8)> = None;
         let mut last_bg: Option<(u8, u8, u8)> = None;
-        
+
         // ... (centering logic) ...
         let (mut term_cols, mut term_rows) = terminal::size().unwrap_or((80, 24));
 
         // If environment provides CHAR_WIDTH/CHAR_HEIGHT (pixel size per char), convert if
         // terminal::size returned pixel dimensions rather than char counts.
-        if let (Ok(cw_str), Ok(ch_str)) = (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT")) {
+        if let (Ok(cw_str), Ok(ch_str)) =
+            (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
+        {
             if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
                 // If the terminal reports a very large value for term_cols/term_rows, assume it's pixels
-                if term_cols > cw * 16 { // threshold: more than ~16 columns per default
+                if term_cols > cw * 16 {
+                    // threshold: more than ~16 columns per default
                     term_cols = (term_cols / cw).max(1);
                 }
                 if term_rows > ch * 8 {
@@ -181,9 +188,17 @@ impl DisplayManager {
         }
         let content_width = width as u16;
         let content_height = (cells.len() / width) as u16;
-        
-        let offset_x = if term_cols > content_width { (term_cols - content_width) / 2 } else { 0 };
-        let offset_y = if term_rows > content_height { (term_rows - content_height) / 2 } else { 0 };
+
+        let offset_x = if term_cols > content_width {
+            (term_cols - content_width) / 2
+        } else {
+            0
+        };
+        let offset_y = if term_rows > content_height {
+            (term_rows - content_height) / 2
+        } else {
+            0
+        };
 
         // Track virtual cursor position
         let mut cursor_x: i32 = -1;
@@ -194,17 +209,20 @@ impl DisplayManager {
             use std::fs::OpenOptions;
             use std::io::Write;
             let mut log_path = std::env::current_dir().unwrap_or_default();
-            log_path.push("debug.log");
+            log_path.push(constants::DEBUG_LOG_FILE);
             if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
-                let _ = writeln!(file, "RENDER DEBUG: term={}x{} (after conversion) content={}x{} offset={}x{}",
-                                 term_cols, term_rows, content_width, content_height, offset_x, offset_y);
+                let _ = writeln!(
+                    file,
+                    "RENDER DEBUG: term={}x{} (after conversion) content={}x{} offset={}x{}",
+                    term_cols, term_rows, content_width, content_height, offset_x, offset_y
+                );
             }
         }
 
         // OPTIMIZATION: Unified loop for both redraw and diff
         for (i, cell) in cells.iter().enumerate() {
             let old_cell = &last_cells[i];
-            
+
             let is_different = if force_redraw {
                 true
             } else if cell.char != old_cell.char {
@@ -216,16 +234,16 @@ impl DisplayManager {
             if is_different {
                 let x = (i % width) as u16;
                 let y = (i / width) as u16;
-                
+
                 let target_x = x + offset_x;
                 let target_y = y + offset_y;
-                
+
                 // BOUNDS CHECKING: Skip if outside terminal
                 if target_x >= term_cols || target_y >= term_rows {
                     cursor_x = -1;
                     continue;
                 }
-                
+
                 // Zero-Allocation Cursor Move
                 if cursor_x != target_x as i32 || cursor_y != target_y as i32 {
                     buffer.extend_from_slice(b"\x1b[");
@@ -233,11 +251,11 @@ impl DisplayManager {
                     buffer.push(b';');
                     Self::write_u16_fast(buffer, target_x + 1);
                     buffer.push(b'H');
-                    
+
                     cursor_x = target_x as i32;
                     cursor_y = target_y as i32;
                 }
-                
+
                 // Render based on mode
                 match self.mode {
                     DisplayMode::Rgb => {
@@ -269,33 +287,38 @@ impl DisplayManager {
                         // ASCII mode: No colors, convert to grayscale ASCII art
                         // Convert RGB to grayscale brightness: 0.299*R + 0.587*G + 0.114*B
                         // We use the foreground color for brightness calculation
-                        let brightness = (cell.fg.0 as u32 * 299 + cell.fg.1 as u32 * 587 + cell.fg.2 as u32 * 114) / 1000;
-                        
+                        let brightness = (cell.fg.0 as u32 * 299
+                            + cell.fg.1 as u32 * 587
+                            + cell.fg.2 as u32 * 114)
+                            / 1000;
+
                         // ASCII character set from darkest to brightest
-                        const ASCII_CHARS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
-                        
+                        const ASCII_CHARS: &[char] =
+                            &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+
                         // Map brightness (0-255) to character index (0-9)
-                        let char_idx = ((brightness * (ASCII_CHARS.len() as u32 - 1)) / 255) as usize;
+                        let char_idx =
+                            ((brightness * (ASCII_CHARS.len() as u32 - 1)) / 255) as usize;
                         let ascii_char = ASCII_CHARS[char_idx];
-                        
+
                         // Write the ASCII character directly (no color codes)
                         let mut b_dst = [0u8; 4];
                         buffer.extend_from_slice(ascii_char.encode_utf8(&mut b_dst).as_bytes());
-                        
+
                         last_cells[i] = *cell;
                         cursor_x += 1;
-                        
+
                         // Skip the normal character write below
                         continue;
                     }
                 }
-                
+
                 // Write character (RGB mode only, ASCII mode already wrote above)
                 let mut b_dst = [0u8; 4];
                 buffer.extend_from_slice(cell.char.encode_utf8(&mut b_dst).as_bytes());
-                
+
                 last_cells[i] = *cell;
-                
+
                 // Advance virtual cursor
                 cursor_x += 1;
             } else {
@@ -305,35 +328,37 @@ impl DisplayManager {
         }
 
         buffer.extend_from_slice(b"\x1b[0m");
-        
+
         // VSync End (Directly into buffer)
         buffer.extend_from_slice(b"\x1b[?2026l");
 
         let diff_time = start_render.elapsed();
-        
+
         // I/O Measurement
         let start_io = std::time::Instant::now();
         self.stdout.write_all(buffer)?;
         self.stdout.flush()?;
         let io_time = start_io.elapsed();
-        
+
         let total_time = start_render.elapsed();
         if total_time.as_millis() > 10 {
-             use std::fs::OpenOptions;
-             use std::io::Write;
-             let mut log_path = std::env::current_dir().unwrap_or_default();
-             log_path.push("debug.log");
-             
-             if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
-                 let _ = writeln!(file, "FAST RENDER: Total={}us | Diff={}us | IO={}us | Cells: {}", 
-                     total_time.as_micros(),
-                     diff_time.as_micros(),
-                     io_time.as_micros(),
-                     cells.len()
-                 );
-             }
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let mut log_path = std::env::current_dir().unwrap_or_default();
+            log_path.push(constants::DEBUG_LOG_FILE);
+
+            if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
+                let _ = writeln!(
+                    file,
+                    "FAST RENDER: Total={}us | Diff={}us | IO={}us | Cells: {}",
+                    total_time.as_micros(),
+                    diff_time.as_micros(),
+                    io_time.as_micros(),
+                    cells.len()
+                );
+            }
         }
-        
+
         Ok(())
     }
 }
@@ -345,4 +370,3 @@ impl Drop for DisplayManager {
         let _ = terminal::disable_raw_mode();
     }
 }
-

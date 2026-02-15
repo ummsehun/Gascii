@@ -2,3 +2,7 @@
 LIBCLANG_PATH = "/Library/Developer/CommandLineTools/usr/lib"
 CC = "clang"
 CXX = "clang++"
+
+[alias]
+menu = "run --release -- menu"
+play = "run --release -- menu"
