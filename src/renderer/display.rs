@@ -6,6 +6,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use std::io::{BufWriter, Stdout, Write};
+use std::time::{Duration, Instant};
 
 use super::cell::CellData;
 use crate::shared::constants;
@@ -21,6 +22,12 @@ pub struct DisplayManager {
     mode: DisplayMode,
     last_cells: Option<Vec<CellData>>,
     render_buffer: Vec<u8>,
+    perf_window_start: Instant,
+    perf_frames: u64,
+    perf_slow_frames: u64,
+    perf_total_us: u128,
+    perf_diff_us: u128,
+    perf_io_us: u128,
 }
 
 impl DisplayManager {
@@ -33,6 +40,12 @@ impl DisplayManager {
             mode,
             last_cells: None,
             render_buffer: Vec::with_capacity(4 * 1024 * 1024), // Pre-allocate 4MB buffer
+            perf_window_start: Instant::now(),
+            perf_frames: 0,
+            perf_slow_frames: 0,
+            perf_total_us: 0,
+            perf_diff_us: 0,
+            perf_io_us: 0,
         };
 
         dm.initialize_terminal()?;
@@ -204,21 +217,6 @@ impl DisplayManager {
         let mut cursor_x: i32 = -1;
         let mut cursor_y: i32 = -1;
 
-        // Debug logging
-        if std::env::var("BAD_APPLE_DEBUG").is_ok() {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            let mut log_path = std::env::current_dir().unwrap_or_default();
-            log_path.push(constants::DEBUG_LOG_FILE);
-            if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
-                let _ = writeln!(
-                    file,
-                    "RENDER DEBUG: term={}x{} (after conversion) content={}x{} offset={}x{}",
-                    term_cols, term_rows, content_width, content_height, offset_x, offset_y
-                );
-            }
-        }
-
         // OPTIMIZATION: Unified loop for both redraw and diff
         for (i, cell) in cells.iter().enumerate() {
             let old_cell = &last_cells[i];
@@ -341,25 +339,53 @@ impl DisplayManager {
         let io_time = start_io.elapsed();
 
         let total_time = start_render.elapsed();
-        if total_time.as_millis() > 10 {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            let mut log_path = std::env::current_dir().unwrap_or_default();
-            log_path.push(constants::DEBUG_LOG_FILE);
-
-            if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
-                let _ = writeln!(
-                    file,
-                    "FAST RENDER: Total={}us | Diff={}us | IO={}us | Cells: {}",
-                    total_time.as_micros(),
-                    diff_time.as_micros(),
-                    io_time.as_micros(),
-                    cells.len()
-                );
-            }
-        }
+        self.record_render_stats(total_time, diff_time, io_time, cells.len());
 
         Ok(())
+    }
+
+    fn record_render_stats(
+        &mut self,
+        total_time: Duration,
+        diff_time: Duration,
+        io_time: Duration,
+        cells: usize,
+    ) {
+        self.perf_frames += 1;
+        self.perf_total_us += total_time.as_micros();
+        self.perf_diff_us += diff_time.as_micros();
+        self.perf_io_us += io_time.as_micros();
+        if total_time > Duration::from_millis(16) {
+            self.perf_slow_frames += 1;
+        }
+
+        if self.perf_frames % constants::PERF_LOG_EVERY_FRAMES != 0 {
+            return;
+        }
+
+        let elapsed = self.perf_window_start.elapsed().as_secs_f64().max(0.001);
+        let fps = self.perf_frames as f64 / elapsed;
+        let avg_total_ms = self.perf_total_us as f64 / self.perf_frames as f64 / 1000.0;
+        let avg_diff_ms = self.perf_diff_us as f64 / self.perf_frames as f64 / 1000.0;
+        let avg_io_ms = self.perf_io_us as f64 / self.perf_frames as f64 / 1000.0;
+
+        crate::utils::logger::debug(&format!(
+            "render perf: fps={:.1} avg_total={:.2}ms avg_diff={:.2}ms avg_io={:.2}ms slow={}/{} cells={}",
+            fps,
+            avg_total_ms,
+            avg_diff_ms,
+            avg_io_ms,
+            self.perf_slow_frames,
+            self.perf_frames,
+            cells
+        ));
+
+        self.perf_window_start = Instant::now();
+        self.perf_frames = 0;
+        self.perf_slow_frames = 0;
+        self.perf_total_us = 0;
+        self.perf_diff_us = 0;
+        self.perf_io_us = 0;
     }
 }
 

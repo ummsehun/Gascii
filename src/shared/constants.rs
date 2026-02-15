@@ -28,3 +28,12 @@ pub const MENU_NO_AUDIO_LABEL: &str = "오디오 없이 재생";
 
 pub const WINDOWED_COLUMNS: u16 = 240;
 pub const WINDOWED_ROWS: u16 = 68;
+pub const FRAME_QUEUE_CAPACITY: usize = 36;
+pub const PERF_LOG_EVERY_FRAMES: u64 = 180;
+
+pub const GHOSTTY_BIN_NAME: &str = "ghostty";
+pub const GHOSTTY_MACOS_APP_BIN: &str = "/Applications/Ghostty.app/Contents/MacOS/ghostty";
+pub const GHOSTTY_MACOS_APP_BUNDLE: &str = "/Applications/Ghostty.app";
+pub const GHOSTTY_FULLSCREEN_ARG: &str = "--fullscreen";
+
+pub const PLAY_SUBCOMMAND: &str = "play-live";
