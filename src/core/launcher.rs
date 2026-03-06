@@ -20,10 +20,11 @@ pub fn run() -> Result<()> {
     };
 
     crate::utils::logger::info(&format!(
-        "launch selection: video={} mode={} fill={} audio={}",
+        "launch selection: video={} mode={} fill={} font_size={} audio={}",
         selection.video_path.display(),
         mode,
         selection.fill_screen,
+        selection.font_size,
         selection
             .audio_path
             .as_ref()
@@ -40,14 +41,9 @@ pub fn run() -> Result<()> {
         "ghostty not found or launch failed; using current terminal fallback",
     );
 
-    if selection.fill_screen {
-        crate::utils::terminal_control::request_fullscreen(true);
-    } else {
-        crate::utils::terminal_control::request_resize(
-            constants::WINDOWED_COLUMNS,
-            constants::WINDOWED_ROWS,
-        );
-    }
+    // Always request true fullscreen window for menu-launched playback.
+    // "fill_screen" controls content layout only (cover vs 16:9 fit).
+    crate::utils::terminal_control::request_fullscreen(true);
     std::thread::sleep(Duration::from_millis(150));
 
     crate::ui::interactive::run_game(
@@ -99,19 +95,14 @@ fn build_ghostty_runtime_args(selection: &MenuSelection) -> Result<Vec<OsString>
         "--config-file={}",
         config_path.display()
     ))];
+    args.push(constants::GHOSTTY_WINDOW_INHERIT_FONT_SIZE_ARG.into());
+    args.push(OsString::from(format!(
+        "--font-size={}",
+        selection.font_size
+    )));
 
-    if selection.fill_screen {
-        args.push(constants::GHOSTTY_FULLSCREEN_ARG.into());
-    } else {
-        args.push(OsString::from(format!(
-            "--window-width={}",
-            constants::WINDOWED_COLUMNS
-        )));
-        args.push(OsString::from(format!(
-            "--window-height={}",
-            constants::WINDOWED_ROWS
-        )));
-    }
+    // Always launch Ghostty as fullscreen window.
+    args.push(constants::GHOSTTY_FULLSCREEN_ARG.into());
 
     args.push(OsString::from("-e"));
     args.push(current_exe.into_os_string());
@@ -138,6 +129,9 @@ fn try_open_ghostty_bundle(bundle_path: &Path, runtime_args: &[OsString]) -> Res
     let mut cmd = Command::new("open");
     cmd.arg("-na").arg(bundle_path).arg("--args");
     cmd.args(runtime_args);
+    if let Ok(project_root) = std::env::current_dir() {
+        cmd.env("GASCII_PROJECT_ROOT", project_root);
+    }
 
     match cmd.status() {
         Ok(status) if status.success() => {
@@ -164,6 +158,9 @@ fn try_open_ghostty_bundle(bundle_path: &Path, runtime_args: &[OsString]) -> Res
 fn try_spawn_ghostty_binary(ghostty_bin: &Path, runtime_args: &[OsString]) -> Result<bool> {
     let mut cmd = Command::new(ghostty_bin);
     cmd.args(runtime_args);
+    if let Ok(project_root) = std::env::current_dir() {
+        cmd.env("GASCII_PROJECT_ROOT", project_root);
+    }
 
     match cmd.spawn() {
         Ok(mut child) => {

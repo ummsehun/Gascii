@@ -66,6 +66,7 @@ pub struct MenuSelection {
     pub audio_path: Option<PathBuf>,
     pub mode: DisplayMode,
     pub fill_screen: bool,
+    pub font_size: f32,
 }
 
 struct MenuApp {
@@ -263,20 +264,24 @@ impl MenuApp {
                     return;
                 }
 
-                self.selection = Some(MenuSelection {
-                    video_path: self.video_files[self.video_index].clone(),
-                    audio_path: if self.audio_index == 0 {
-                        None
-                    } else {
-                        Some(self.audio_files[self.audio_index - 1].clone())
-                    },
-                    mode: if self.render_index == 0 {
-                        DisplayMode::Rgb
-                    } else {
-                        DisplayMode::Ascii
-                    },
-                    fill_screen: self.screen_index == 0,
-                });
+                self.selection =
+                    Some(MenuSelection {
+                        video_path: self.video_files[self.video_index].clone(),
+                        audio_path: if self.audio_index == 0 {
+                            None
+                        } else {
+                            Some(self.audio_files[self.audio_index - 1].clone())
+                        },
+                        mode: if self.render_index == 0 {
+                            DisplayMode::Rgb
+                        } else {
+                            DisplayMode::Ascii
+                        },
+                        fill_screen: self.screen_index == 0,
+                        font_size: self.font_input.trim().parse::<f32>().unwrap_or_else(|_| {
+                            constants::DEFAULT_FONT_SIZE.parse().unwrap_or(2.5)
+                        }),
+                    });
                 self.should_quit = true;
             }
             _ => {}
@@ -521,6 +526,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
     } else {
         "false"
     };
+    let font_size = app.font_input.trim();
 
     let confirm = Paragraph::new(vec![
         Line::from(Span::styled(
@@ -534,6 +540,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
         Line::from(format!("Audio: {}", audio)),
         Line::from(format!("Mode: {}", mode)),
         Line::from(format!("Fill: {}", fill_screen)),
+        Line::from(format!("Font: {}", font_size)),
         Line::from(""),
         Line::from("Enter: 실행   Backspace: 이전   Esc: 종료"),
     ])

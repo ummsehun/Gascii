@@ -11,6 +11,11 @@ pub struct FrameData {
 
 impl FrameData {
     pub fn new(buffer: Vec<u8>, width: u32, height: u32, timestamp: Duration) -> Self {
-        Self { buffer, width, height, timestamp }
+        Self {
+            buffer,
+            width,
+            height,
+            timestamp,
+        }
     }
 }

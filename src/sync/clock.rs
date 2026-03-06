@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 /// Monotonic master clock for audio/video synchronization
-/// 
+///
 /// This clock provides a single source of truth for elapsed time,
 /// allowing audio and video to stay in sync.
 pub struct MasterClock {

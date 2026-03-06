@@ -20,6 +20,7 @@ pub enum DisplayMode {
 pub struct DisplayManager {
     stdout: BufWriter<Stdout>,
     mode: DisplayMode,
+    rgb_diff_threshold: u8,
     last_cells: Option<Vec<CellData>>,
     render_buffer: Vec<u8>,
     perf_window_start: Instant,
@@ -38,6 +39,7 @@ impl DisplayManager {
         let mut dm = Self {
             stdout,
             mode,
+            rgb_diff_threshold: constants::RGB_COLOR_DELTA_THRESHOLD,
             last_cells: None,
             render_buffer: Vec::with_capacity(4 * 1024 * 1024), // Pre-allocate 4MB buffer
             perf_window_start: Instant::now(),
@@ -75,22 +77,18 @@ impl DisplayManager {
         Ok(())
     }
 
-    /// Return terminal size in character columns and rows, converting from pixels when needed.
+    /// Return terminal size in character columns and rows.
     pub fn terminal_size_chars(&self) -> Result<(u16, u16)> {
-        let (mut term_cols, mut term_rows) = terminal::size()?;
-        if let (Ok(cw_str), Ok(ch_str)) =
-            (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
-        {
-            if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
-                if term_cols > cw * 16 {
-                    term_cols = (term_cols / cw).max(1);
-                }
-                if term_rows > ch * 8 {
-                    term_rows = (term_rows / ch).max(1);
-                }
-            }
-        }
-        Ok((term_cols, term_rows))
+        // crossterm::terminal::size() already returns character-cell units.
+        // Avoid heuristic conversion from env vars, which can mis-detect
+        // fullscreen terminals as pixel sizes and shrink the render area.
+        terminal::size().map_err(Into::into)
+    }
+
+    pub fn set_rgb_diff_threshold(&mut self, threshold: u8) {
+        self.rgb_diff_threshold = threshold
+            .max(constants::RGB_COLOR_DELTA_THRESHOLD)
+            .min(constants::RGB_COLOR_DELTA_THRESHOLD_MAX);
     }
 
     // Helper for zero-allocation integer writing
@@ -151,6 +149,36 @@ impl DisplayManager {
         }
     }
 
+    #[inline(always)]
+    fn color_changed(a: (u8, u8, u8), b: (u8, u8, u8), threshold: u8) -> bool {
+        let th = threshold as i16;
+        (a.0 as i16 - b.0 as i16).abs() > th
+            || (a.1 as i16 - b.1 as i16).abs() > th
+            || (a.2 as i16 - b.2 as i16).abs() > th
+    }
+
+    #[inline(always)]
+    fn ascii_index(cell: &CellData, x: usize, y: usize) -> usize {
+        let top = (cell.fg.0 as u16 * 299 + cell.fg.1 as u16 * 587 + cell.fg.2 as u16 * 114) as f32
+            / 1000.0;
+        let bottom = (cell.bg.0 as u16 * 299 + cell.bg.1 as u16 * 587 + cell.bg.2 as u16 * 114)
+            as f32
+            / 1000.0;
+        let mut brightness = (top + bottom) * 0.5;
+
+        // Subtle ordered dithering keeps detail in low-contrast areas.
+        const BAYER_4X4: [f32; 16] = [
+            0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0,
+        ];
+        let d = BAYER_4X4[(y & 3) * 4 + (x & 3)];
+        brightness = (brightness + (d - 7.5) * 1.4).clamp(0.0, 255.0);
+
+        let normalized = (brightness / 255.0).powf(constants::ASCII_GAMMA);
+        let gradient_len = constants::ASCII_GRADIENT.len();
+        ((normalized * (gradient_len.saturating_sub(1)) as f32).round() as usize)
+            .min(gradient_len.saturating_sub(1))
+    }
+
     // Optimized Diffing Renderer with Zero-Allocation
     pub fn render_diff(&mut self, cells: &[CellData], width: usize) -> Result<()> {
         let start_render = std::time::Instant::now();
@@ -181,24 +209,8 @@ impl DisplayManager {
         let mut last_bg: Option<(u8, u8, u8)> = None;
 
         // ... (centering logic) ...
-        let (mut term_cols, mut term_rows) = terminal::size().unwrap_or((80, 24));
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
 
-        // If environment provides CHAR_WIDTH/CHAR_HEIGHT (pixel size per char), convert if
-        // terminal::size returned pixel dimensions rather than char counts.
-        if let (Ok(cw_str), Ok(ch_str)) =
-            (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
-        {
-            if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
-                // If the terminal reports a very large value for term_cols/term_rows, assume it's pixels
-                if term_cols > cw * 16 {
-                    // threshold: more than ~16 columns per default
-                    term_cols = (term_cols / cw).max(1);
-                }
-                if term_rows > ch * 8 {
-                    term_rows = (term_rows / ch).max(1);
-                }
-            }
-        }
         let content_width = width as u16;
         let content_height = (cells.len() / width) as u16;
 
@@ -220,18 +232,30 @@ impl DisplayManager {
         // OPTIMIZATION: Unified loop for both redraw and diff
         for (i, cell) in cells.iter().enumerate() {
             let old_cell = &last_cells[i];
+            let x = i % width;
+            let y = i / width;
+            let mut ascii_idx_new: Option<usize> = None;
 
             let is_different = if force_redraw {
                 true
-            } else if cell.char != old_cell.char {
-                true
             } else {
-                cell.fg != old_cell.fg || cell.bg != old_cell.bg
+                match self.mode {
+                    DisplayMode::Rgb => {
+                        cell.char != old_cell.char
+                            || Self::color_changed(cell.fg, old_cell.fg, self.rgb_diff_threshold)
+                            || Self::color_changed(cell.bg, old_cell.bg, self.rgb_diff_threshold)
+                    }
+                    DisplayMode::Ascii => {
+                        let idx = Self::ascii_index(cell, x, y);
+                        ascii_idx_new = Some(idx);
+                        idx != Self::ascii_index(old_cell, x, y)
+                    }
+                }
             };
 
             if is_different {
-                let x = (i % width) as u16;
-                let y = (i / width) as u16;
+                let x = x as u16;
+                let y = y as u16;
 
                 let target_x = x + offset_x;
                 let target_y = y + offset_y;
@@ -282,22 +306,13 @@ impl DisplayManager {
                         }
                     }
                     DisplayMode::Ascii => {
-                        // ASCII mode: No colors, convert to grayscale ASCII art
-                        // Convert RGB to grayscale brightness: 0.299*R + 0.587*G + 0.114*B
-                        // We use the foreground color for brightness calculation
-                        let brightness = (cell.fg.0 as u32 * 299
-                            + cell.fg.1 as u32 * 587
-                            + cell.fg.2 as u32 * 114)
-                            / 1000;
-
-                        // ASCII character set from darkest to brightest
-                        const ASCII_CHARS: &[char] =
-                            &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
-
-                        // Map brightness (0-255) to character index (0-9)
-                        let char_idx =
-                            ((brightness * (ASCII_CHARS.len() as u32 - 1)) / 255) as usize;
-                        let ascii_char = ASCII_CHARS[char_idx];
+                        let idx = ascii_idx_new
+                            .unwrap_or_else(|| Self::ascii_index(cell, x as usize, y as usize));
+                        let ascii_char = constants::ASCII_GRADIENT
+                            .as_bytes()
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(b' ') as char;
 
                         // Write the ASCII character directly (no color codes)
                         let mut b_dst = [0u8; 4];

@@ -1,8 +1,8 @@
-use std::time::{Duration, Instant};
 use super::clock::MasterClock;
+use std::time::{Duration, Instant};
 
 /// Adaptive VSync manager for smooth frame pacing
-/// 
+///
 /// Handles frame timing with compensation for rendering overhead
 /// and supports frame dropping when running behind schedule.
 pub struct VSync {
@@ -27,12 +27,12 @@ impl VSync {
     }
 
     /// Wait until it's time to render the next frame
-    /// 
+    ///
     /// This accounts for rendering time and sleeps only if needed.
     /// If we're already past the next frame time, returns immediately.
     pub fn wait_for_next_frame(&mut self) {
         let now = Instant::now();
-        
+
         // If we're more than one frame duration behind, resync
         // This prevents infinite drift where next_frame_time keeps getting further behind
         if now > self.next_frame_time + self.frame_duration * 3 {
@@ -41,23 +41,23 @@ impl VSync {
             self.frames_rendered += 1;
             return;
         }
-        
+
         if now < self.next_frame_time {
             std::thread::sleep(self.next_frame_time - now);
         }
-        
+
         // Advance to next frame
         self.next_frame_time += self.frame_duration;
         self.frames_rendered += 1;
     }
 
     /// Check if we should drop the current frame to catch up
-    /// 
+    ///
     /// Returns true if the clock is significantly ahead of where we should be
     pub fn should_drop_frame(&self, clock: &MasterClock) -> bool {
         let elapsed = clock.elapsed();
         let expected_frame = (elapsed.as_secs_f64() * self.target_fps) as u64;
-        
+
         // Only drop if we're more than 5 frames behind (very aggressive lag)
         // Reduced from 2 to prevent premature frame dropping
         let behind_by = expected_frame.saturating_sub(self.frames_rendered);

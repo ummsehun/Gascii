@@ -1,5 +1,5 @@
 use anyhow::Result;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::process::Command;
 
@@ -30,17 +30,17 @@ pub struct PlatformInfo {
 impl PlatformInfo {
     pub fn detect() -> Result<Self> {
         let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
-        
+
         // Detect actual screen resolution
         let (screen_w, screen_h) = Self::detect_screen_resolution();
-        
+
         // Use simple defaults for character size (most terminals use roughly 1:2 ratio)
         let char_w = 10;
         let char_h = 20;
         let pixel_width = width as u32 * char_w;
         let pixel_height = height as u32 * char_h;
         let aspect = char_w as f32 / char_h as f32;
-        
+
         Ok(Self {
             os_name: std::env::consts::OS.to_string(),
             os_version: Self::detect_os_version(),
@@ -73,29 +73,35 @@ impl PlatformInfo {
                 .output()
             {
                 let output_str = String::from_utf8_lossy(&output.stdout);
-                
+
                 // Look for "Resolution:" line
                 for line in output_str.lines() {
                     if line.contains("Resolution:") {
                         eprintln!("DEBUG: Found resolution line: '{}'", line);
-                        
+
                         // Extract everything after "Resolution:"
                         if let Some(after_colon) = line.split("Resolution:").nth(1) {
                             let resolution_str = after_colon.trim();
                             eprintln!("DEBUG: Resolution str: '{}'", resolution_str);
-                            
+
                             // Split by 'x' -> ["2880 ", " 1864 Retina"]
-                            let parts: Vec<&str> = resolution_str.split('x').map(|s| s.trim()).collect();
+                            let parts: Vec<&str> =
+                                resolution_str.split('x').map(|s| s.trim()).collect();
                             eprintln!("DEBUG: Parts: {:?}", parts);
-                            
+
                             if parts.len() >= 2 {
                                 let width_str = parts[0];
                                 // Take only the number part from "1864 Retina" -> "1864"
                                 let height_str = parts[1].split_whitespace().next().unwrap_or("");
-                                
-                                eprintln!("DEBUG: Parsing - Width: '{}', Height: '{}'", width_str, height_str);
-                                
-                                if let (Ok(w), Ok(h)) = (width_str.parse::<u32>(), height_str.parse::<u32>()) {
+
+                                eprintln!(
+                                    "DEBUG: Parsing - Width: '{}', Height: '{}'",
+                                    width_str, height_str
+                                );
+
+                                if let (Ok(w), Ok(h)) =
+                                    (width_str.parse::<u32>(), height_str.parse::<u32>())
+                                {
                                     eprintln!("DEBUG: Successfully parsed: {}x{}", w, h);
                                     return (w, h);
                                 } else {
@@ -110,16 +116,16 @@ impl PlatformInfo {
                 eprintln!("DEBUG: system_profiler command failed");
             }
         }
-        
+
         // Fallback: assume 1920x1080
         (1920, 1080)
     }
 
     #[allow(dead_code)]
     fn detect_pixel_size(cols: u16, rows: u16) -> (u32, u32, u32, u32) {
-        use std::io::{Write, Read};
+        use std::io::{Read, Write};
         use std::time::Duration;
-        
+
         // Try CSI 14t (terminal window size in pixels)
         // This might not work on all terminals
         if let Ok(mut term) = std::fs::OpenOptions::new()
@@ -130,10 +136,10 @@ impl PlatformInfo {
             // Query terminal window size in pixels: CSI 14 t
             let _ = term.write_all(b"\x1b[14t");
             let _ = term.flush();
-            
+
             // Give terminal time to respond
             std::thread::sleep(Duration::from_millis(50));
-            
+
             let mut response = vec![0u8; 64];
             if let Ok(n) = term.read(&mut response) {
                 let resp_str = String::from_utf8_lossy(&response[..n]);
@@ -150,14 +156,14 @@ impl PlatformInfo {
                 }
             }
         }
-        
+
         // Fallback: assume standard terminal character ratio (1:2)
         // Most terminal fonts have characters that are roughly half as wide as they are tall
         let char_w = 10;
         let char_h = 20;
         let pixel_w = cols as u32 * char_w;
         let pixel_h = rows as u32 * char_h;
-        
+
         (pixel_w, pixel_h, char_w, char_h)
     }
 
@@ -189,16 +195,22 @@ impl PlatformInfo {
     }
 
     fn detect_truecolor() -> bool {
-        env::var("COLORTERM").map(|v| v.contains("truecolor") || v.contains("24bit")).unwrap_or(false)
+        env::var("COLORTERM")
+            .map(|v| v.contains("truecolor") || v.contains("24bit"))
+            .unwrap_or(false)
     }
 
     fn detect_kitty() -> bool {
-        env::var("TERM").map(|v| v.contains("kitty")).unwrap_or(false)
+        env::var("TERM")
+            .map(|v| v.contains("kitty"))
+            .unwrap_or(false)
     }
 
     fn detect_sixel() -> bool {
         // Basic check for iTerm2 or known sixel terminals
-        env::var("TERM_PROGRAM").map(|v| v.contains("iTerm")).unwrap_or(false)
+        env::var("TERM_PROGRAM")
+            .map(|v| v.contains("iTerm"))
+            .unwrap_or(false)
     }
 
     fn detect_memory() -> u64 {

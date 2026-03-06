@@ -22,31 +22,8 @@ pub fn run_game(
     // 1. Terminal Setup
     let (terminal_w, terminal_h) = resolve_terminal_size(fill_screen)?;
 
-    // Calculate target dimensions
-    // We want 16:9 aspect ratio if not filling screen
-    let (target_w, target_h) = if fill_screen {
-        (terminal_w, terminal_h)
-    } else {
-        // Visual 16:9 aspect ratio
-        // Since we use Half-Block rendering (1 char = 2 vertical pixels),
-        // the cell aspect ratio is effectively 1:2.
-        // To achieve visual 16:9, the grid ratio must be 16:4.5 = 32:9 ≈ 3.55
-        let target_ratio = 32.0 / 9.0;
-        let terminal_ratio = terminal_w as f32 / terminal_h as f32;
-
-        let (w, h) = if terminal_ratio > target_ratio {
-            // Terminal is wider -> fit to height
-            let h = terminal_h;
-            let w = (h as f32 * target_ratio) as u32;
-            (w, h)
-        } else {
-            // Terminal is taller -> fit to width
-            let w = terminal_w;
-            let h = (w as f32 / target_ratio) as u32;
-            (w, h)
-        };
-        (w.saturating_sub(2), h)
-    };
+    // Calculate target dimensions.
+    let (target_w, target_h) = compute_target_dimensions(terminal_w, terminal_h, fill_screen);
 
     println!(
         "\n🚀 재생 시작: {} ({}x{} 픽셀, {})",
@@ -70,6 +47,48 @@ pub fn run_game(
     )
 }
 
+fn compute_target_dimensions(terminal_w: u32, terminal_h: u32, fill_screen: bool) -> (u32, u32) {
+    if fill_screen {
+        return (terminal_w.max(1), terminal_h.max(1));
+    }
+
+    // Keep visual 16:9 by compensating with actual terminal cell geometry.
+    // grid_ratio = aspect * (cell_height / cell_width)
+    let cell_aspect = estimate_cell_aspect_ratio();
+    let target_ratio = (16.0 / 9.0) * (1.0 / cell_aspect);
+    let terminal_ratio = terminal_w as f32 / terminal_h.max(1) as f32;
+
+    let (w, h) = if terminal_ratio > target_ratio {
+        // Terminal is wider -> fit to height
+        let h = terminal_h;
+        let w = (h as f32 * target_ratio) as u32;
+        (w, h)
+    } else {
+        // Terminal is taller -> fit to width
+        let w = terminal_w;
+        let h = (w as f32 / target_ratio) as u32;
+        (w, h)
+    };
+
+    (w.max(1), h.max(1))
+}
+
+fn estimate_cell_aspect_ratio() -> f32 {
+    // width / height of one terminal character cell.
+    if let Ok(ws) = crossterm::terminal::window_size() {
+        if ws.columns > 0 && ws.rows > 0 && ws.width > 0 && ws.height > 0 {
+            let cw = ws.width as f32 / ws.columns as f32;
+            let ch = ws.height as f32 / ws.rows as f32;
+            if cw > 0.0 && ch > 0.0 {
+                return (cw / ch).clamp(0.2, 1.5);
+            }
+        }
+    }
+
+    // Common monospaced terminal cell ratio fallback.
+    0.5
+}
+
 fn resolve_terminal_size(fill_screen: bool) -> Result<(u32, u32)> {
     let initial = crossterm::terminal::size()?;
 
@@ -77,48 +96,73 @@ fn resolve_terminal_size(fill_screen: bool) -> Result<(u32, u32)> {
         return Ok((initial.0 as u32, initial.1 as u32));
     }
 
-    // Request true window fullscreen (OS-level + xterm op)
+    // First request includes macOS OS-level automation.
     crate::utils::terminal_control::request_fullscreen(true);
 
     let start = Instant::now();
-    let timeout = Duration::from_secs(3);
+    let timeout = Duration::from_secs(8);
     let mut last = initial;
-    let mut changed_at: Option<Instant> = None;
+    let mut changed_at = Instant::now();
+    let mut changed_once = false;
+    let mut last_request = Instant::now() - Duration::from_secs(1);
+    let mut max_seen = initial;
 
     while start.elapsed() < timeout {
+        if last_request.elapsed() >= Duration::from_millis(350) {
+            // Keep sending terminal-level fullscreen hints during startup.
+            crate::utils::terminal_control::request_fullscreen(false);
+            last_request = Instant::now();
+        }
+
         std::thread::sleep(Duration::from_millis(60));
         let size = crossterm::terminal::size()?;
+        max_seen.0 = max_seen.0.max(size.0);
+        max_seen.1 = max_seen.1.max(size.1);
 
         if size != last {
             last = size;
-            changed_at = Some(Instant::now());
+            changed_at = Instant::now();
+            changed_once = true;
             continue;
         }
 
-        if let Some(changed) = changed_at {
-            if changed.elapsed() >= Duration::from_millis(180) {
+        // If we've already seen size changes and it has stabilized for a bit, start playback.
+        if changed_once
+            && changed_at.elapsed() >= Duration::from_millis(850)
+            && start.elapsed() >= Duration::from_millis(1500)
+        {
+            break;
+        }
+
+        // If we're already at a large terminal and nothing changes, avoid full timeout.
+        if !changed_once && start.elapsed() >= Duration::from_millis(1200) {
+            let (cols, rows) = size;
+            if cols >= 160 && rows >= 45 {
                 break;
             }
-        } else if start.elapsed() >= Duration::from_millis(450) {
-            // No resize event observed quickly; don't block startup too long.
-            break;
         }
     }
 
     let final_size = crossterm::terminal::size().unwrap_or(last);
-    if final_size == initial {
+    let chosen = if max_seen.0 > final_size.0 && max_seen.1 > final_size.1 {
+        max_seen
+    } else {
+        final_size
+    };
+
+    if chosen == initial {
         crate::utils::logger::info(&format!(
             "fullscreen size unchanged: {}x{}",
-            final_size.0, final_size.1
+            chosen.0, chosen.1
         ));
     } else {
         crate::utils::logger::info(&format!(
-            "fullscreen size updated: {}x{} -> {}x{}",
-            initial.0, initial.1, final_size.0, final_size.1
+            "fullscreen size updated: {}x{} -> {}x{} (max_seen={}x{})",
+            initial.0, initial.1, chosen.0, chosen.1, max_seen.0, max_seen.1
         ));
     }
 
-    Ok((final_size.0 as u32, final_size.1 as u32))
+    Ok((chosen.0 as u32, chosen.1 as u32))
 }
 
 /// ANSI rendering pipeline (optimized for all content)
@@ -133,12 +177,40 @@ fn run_ansi_mode(
     // Initialize display manager
     let mut display = DisplayManager::new(mode)?;
 
+    // Fullscreen animations can continue resizing after startup.
+    // Re-check actual terminal size in the render context and recompute targets.
+    let (live_cols, live_rows) = display
+        .terminal_size_chars()
+        .unwrap_or((target_w as u16, target_h as u16));
+    let (target_w, target_h) =
+        compute_target_dimensions(live_cols as u32, live_rows as u32, fill_screen);
+
     // Create video decoder
     // IMPORTANT: We use Half-Block rendering, so vertical resolution is 2x terminal rows
     let pixel_w = target_w;
     let pixel_h = target_h * 2;
 
-    let decoder = VideoDecoder::new(video_path.to_str().unwrap(), pixel_w, pixel_h, fill_screen)?;
+    crate::utils::logger::info(&format!(
+        "render target resolved: {}x{} (live_term={}x{} fill={})",
+        target_w, target_h, live_cols, live_rows, fill_screen
+    ));
+
+    let allow_upscale = match mode {
+        DisplayMode::Rgb => constants::RGB_ALLOW_UPSCALE,
+        DisplayMode::Ascii => constants::ASCII_ALLOW_UPSCALE,
+    };
+
+    // Keep source aspect in both modes to avoid perceived over-zoom.
+    // fill_screen controls target box size (full terminal vs 16:9 box).
+    let decoder_fill_mode = false;
+
+    let decoder = VideoDecoder::new(
+        video_path.to_str().unwrap(),
+        pixel_w,
+        pixel_h,
+        decoder_fill_mode,
+        allow_upscale,
+    )?;
 
     // Keep queue short to reduce latency/memory pressure on very large terminals.
     let (frame_sender, frame_receiver) =
@@ -179,8 +251,29 @@ fn run_ansi_mode(
 
     crate::utils::logger::debug("Starting render loop");
 
-    // Video start time (will be set on first frame)
-    let mut video_start_time: Option<std::time::Instant> = None;
+    let audio_sync_comp = if audio_player.is_some() {
+        Duration::from_millis(constants::AUDIO_SYNC_COMP_MS)
+    } else {
+        Duration::ZERO
+    };
+    let playback_start = std::time::Instant::now();
+    let high_density_rgb = mode == DisplayMode::Rgb
+        && target_w.saturating_mul(target_h) >= constants::RGB_HIGH_DENSITY_CELL_COUNT;
+    let min_render_interval = if high_density_rgb {
+        Some(Duration::from_secs_f64(
+            1.0 / constants::RGB_HIGH_DENSITY_MAX_FPS as f64,
+        ))
+    } else {
+        None
+    };
+    let mut last_render_at = std::time::Instant::now() - Duration::from_secs(1);
+    if high_density_rgb {
+        crate::utils::logger::info(&format!(
+            "rgb high-density mode enabled: cells={} fps_cap={}",
+            target_w.saturating_mul(target_h),
+            constants::RGB_HIGH_DENSITY_MAX_FPS
+        ));
+    }
 
     loop {
         // Input
@@ -192,13 +285,13 @@ fn run_ansi_mode(
             }
         }
 
-        // Determine current playback time
+        // Determine current playback time (audio-compensated when audio is enabled)
         let now = std::time::Instant::now();
-        let playback_time = if let Some(start) = video_start_time {
-            now.duration_since(start)
-        } else {
-            Duration::ZERO
-        };
+        let elapsed = now
+            .checked_duration_since(playback_start)
+            .unwrap_or(Duration::ZERO);
+        let playback_time = elapsed.saturating_sub(audio_sync_comp);
+        let queue_depth_before_drain = frame_receiver.len();
 
         let mut frame_to_render: Option<crate::decoder::FrameData> = None;
         let mut decoder_disconnected = false;
@@ -207,11 +300,6 @@ fn run_ansi_mode(
         loop {
             match frame_receiver.try_recv() {
                 Ok(frame) => {
-                    // If this is the very first frame, start the clock
-                    if video_start_time.is_none() {
-                        video_start_time = Some(now);
-                    }
-
                     // If frame is in the future, save it and stop draining
                     if frame.timestamp > playback_time {
                         frame_to_render = Some(frame);
@@ -251,6 +339,23 @@ fn run_ansi_mode(
                 }
             }
 
+            // Adaptive RGB diff threshold: if consumer falls behind, relax tiny color changes
+            // to reduce terminal I/O while preserving structural detail.
+            if mode == DisplayMode::Rgb {
+                display.set_rgb_diff_threshold(adaptive_rgb_threshold(
+                    queue_depth_before_drain,
+                    high_density_rgb,
+                ));
+            }
+
+            // On very large RGB surfaces, cap render cadence to keep interaction responsive.
+            if let Some(interval) = min_render_interval {
+                if last_render_at.elapsed() < interval {
+                    frames_dropped += 1;
+                    continue;
+                }
+            }
+
             // Process frame (TrueColor)
             processor.process_frame_into(&frame.buffer, &mut cell_buffer);
 
@@ -258,6 +363,7 @@ fn run_ansi_mode(
                 crate::utils::logger::error(&format!("Render error: {}", e));
                 return Err(e);
             }
+            last_render_at = std::time::Instant::now();
             frame_idx += 1;
         } else {
             if decoder_disconnected {
@@ -294,4 +400,26 @@ fn run_ansi_mode(
     );
 
     Ok(())
+}
+
+fn adaptive_rgb_threshold(queue_depth: usize, high_density_rgb: bool) -> u8 {
+    let base = constants::RGB_COLOR_DELTA_THRESHOLD;
+    let max = constants::RGB_COLOR_DELTA_THRESHOLD_MAX;
+
+    let mut threshold = if queue_depth <= constants::RGB_ADAPTIVE_THRESHOLD_QUEUE_START {
+        base
+    } else {
+        let start = constants::RGB_ADAPTIVE_THRESHOLD_QUEUE_START as f32;
+        let full = constants::RGB_ADAPTIVE_THRESHOLD_QUEUE_FULL as f32;
+        let depth = queue_depth as f32;
+        let t = ((depth - start) / (full - start).max(1.0)).clamp(0.0, 1.0);
+        let span = (max.saturating_sub(base)) as f32;
+        (base as f32 + span * t).round() as u8
+    };
+
+    if high_density_rgb {
+        threshold = threshold.max(base.saturating_add(2));
+    }
+
+    threshold.min(max)
 }

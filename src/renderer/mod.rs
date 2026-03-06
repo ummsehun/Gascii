@@ -1,7 +1,7 @@
-pub mod display;
-pub mod processor;
 pub mod cell;
+pub mod display;
 pub mod kitty;
+pub mod processor;
 
 pub use display::DisplayManager;
 pub use display::DisplayMode;

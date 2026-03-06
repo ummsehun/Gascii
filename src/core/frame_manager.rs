@@ -1,8 +1,8 @@
-use anyhow::Result;
 use crate::utils::file_utils;
+use anyhow::Result;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::collections::VecDeque;
 
 pub struct FrameManager {
     // Metadata
@@ -19,19 +19,26 @@ pub struct FrameManager {
 
 impl FrameManager {
     pub fn new() -> Self {
-        Self { width: 0, height: 0, packed_frames: Vec::new(), expanded_cache: Mutex::new(Vec::new()), cache_order: Mutex::new(VecDeque::new()), cache_capacity: 64 }
+        Self {
+            width: 0,
+            height: 0,
+            packed_frames: Vec::new(),
+            expanded_cache: Mutex::new(Vec::new()),
+            cache_order: Mutex::new(VecDeque::new()),
+            cache_capacity: 64,
+        }
     }
 
     pub fn load_frames(&mut self, dir: &str, _extension: &str) -> Result<usize> {
         let path = std::path::Path::new(dir).join("video.bin");
         println!("Loading video data from {:?}...", path);
-        
+
         if !path.exists() {
             return Ok(0);
         }
 
         let data = file_utils::read_file(&path)?;
-        
+
         if data.len() < 8 {
             return Ok(0);
         }
@@ -40,36 +47,44 @@ impl FrameManager {
         let width = u16::from_le_bytes([data[0], data[1]]) as usize;
         let height = u16::from_le_bytes([data[2], data[3]]) as usize;
         let frame_count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-        
+
         let compressed_body = &data[8..];
-        
-        println!("Decompressing data ({} frames, {}x{})...", frame_count, width, height);
-        
+
+        println!(
+            "Decompressing data ({} frames, {}x{})...",
+            frame_count, width, height
+        );
+
         // Calculate expected unpacked size (1 bit per pixel)
         // Note: The extractor packed it as (width * height * 2 + 7) / 8 bytes per frame
         // We need to decompress to that size first
         let packed_frame_size = ((width * (height * 2)) + 7) / 8;
         let total_packed_size = packed_frame_size * frame_count;
-        
-        let decompressed_packed = lz4::block::decompress(compressed_body, Some(total_packed_size as i32))?;
+
+        let decompressed_packed =
+            lz4::block::decompress(compressed_body, Some(total_packed_size as i32))?;
 
         if decompressed_packed.len() < total_packed_size {
-            anyhow::bail!("Decompressed data length {} shorter than expected {}", decompressed_packed.len(), total_packed_size);
+            anyhow::bail!(
+                "Decompressed data length {} shorter than expected {}",
+                decompressed_packed.len(),
+                total_packed_size
+            );
         }
-        
+
         println!("Storing packed frames...");
         self.packed_frames.reserve(frame_count);
-        
+
         // Unpack each frame to RGB (or Grayscale) for the renderer
         // Renderer expects: [Width(u16)][Height(u16)][R,G,B, R,G,B...]
         // To save memory, let's just store [Width(u16)][Height(u16)][Gray, Gray...] (1 byte per pixel)
-        // But DisplayManager expects RGB (3 bytes). Let's stick to RGB for compatibility for now, 
+        // But DisplayManager expects RGB (3 bytes). Let's stick to RGB for compatibility for now,
         // or update DisplayManager. Updating DisplayManager is better but risky.
         // Let's generate RGB frames to be safe and compatible with existing DisplayManager.
         // It uses more RAM but we solved the DISK size issue.
-        
+
         let _pixels_per_frame = width * (height * 2);
-        
+
         for i in 0..frame_count {
             let packed_start = i * packed_frame_size;
             let packed_frame = &decompressed_packed[packed_start..packed_start + packed_frame_size];
@@ -98,7 +113,9 @@ impl FrameManager {
     }
 
     pub fn get_frame(&self, index: usize) -> Option<Arc<Vec<u8>>> {
-        if index >= self.packed_frames.len() { return None; }
+        if index >= self.packed_frames.len() {
+            return None;
+        }
 
         // Check cache
         {

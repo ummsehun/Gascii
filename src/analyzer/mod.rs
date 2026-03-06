@@ -4,8 +4,8 @@ use std::path::Path;
 /// Content type classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentType {
-    TwoDimensional,      // 2D animation (Bad Apple style)
-    ThreeDimensional,    // 3D live action
+    TwoDimensional,   // 2D animation (Bad Apple style)
+    ThreeDimensional, // 3D live action
 }
 
 /// Analyzes video content to determine optimal rendering strategy
@@ -17,8 +17,8 @@ pub struct ContentAnalyzer {
 impl ContentAnalyzer {
     pub fn new() -> Self {
         Self {
-            sample_frames: 100,  // Analyze first 100 frames
-            threshold: 0.30,      // 30% pixel change threshold
+            sample_frames: 100, // Analyze first 100 frames
+            threshold: 0.30,    // 30% pixel change threshold
         }
     }
 
@@ -27,9 +27,10 @@ impl ContentAnalyzer {
         // Create a temporary decoder just for analysis
         let decoder = crate::decoder::VideoDecoder::new(
             video_path.to_str().unwrap(),
-            640,  // Low res for fast analysis
+            640, // Low res for fast analysis
             360,
-            false // Don't fill
+            false, // Don't fill
+            false,
         )?;
 
         let (sender, receiver) = crossbeam_channel::bounded(10);
@@ -60,9 +61,12 @@ impl ContentAnalyzer {
         }
 
         let avg_diff = diff_sum / frame_count as f32;
-        
-        eprintln!("📊 Content Analysis: {:.1}% avg pixel change", avg_diff * 100.0);
-        
+
+        eprintln!(
+            "📊 Content Analysis: {:.1}% avg pixel change",
+            avg_diff * 100.0
+        );
+
         let content_type = if avg_diff < self.threshold {
             eprintln!("🎨 Classification: 2D Animation (ANSI Renderer)");
             ContentType::TwoDimensional

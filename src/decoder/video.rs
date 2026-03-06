@@ -12,6 +12,7 @@ pub struct VideoDecoder {
     height: u32,
     fps: f64,
     fill_mode: bool,
+    allow_upscale: bool,
     decode_mat: Mat,
     rgb_mat: Mat,
     resizer: fr::Resizer,
@@ -25,7 +26,13 @@ pub struct VideoDecoder {
 }
 
 impl VideoDecoder {
-    pub fn new(path: &str, width: u32, height: u32, fill_mode: bool) -> Result<Self> {
+    pub fn new(
+        path: &str,
+        width: u32,
+        height: u32,
+        fill_mode: bool,
+        allow_upscale: bool,
+    ) -> Result<Self> {
         let mut capture = videoio::VideoCapture::default()?;
 
         // Open with HW-accel related parameters first, then fallback if backend rejects them.
@@ -67,6 +74,7 @@ impl VideoDecoder {
             height,
             fps,
             fill_mode,
+            allow_upscale,
             decode_mat: Mat::default(),
             rgb_mat: Mat::default(),
             resizer: fr::Resizer::new(),
@@ -161,13 +169,27 @@ impl VideoDecoder {
 
         let scale_w = self.width as f64 / orig_w as f64;
         let scale_h = self.height as f64 / orig_h as f64;
-        let scale = if self.fill_mode {
+        let mut scale = if self.fill_mode {
             scale_w.max(scale_h)
         } else {
             scale_w.min(scale_h)
         };
-        let new_w = ((orig_w as f64 * scale).round() as u32).max(1);
-        let new_h = ((orig_h as f64 * scale).round() as u32).max(1);
+        if scale > 1.0 {
+            if self.allow_upscale {
+                scale = scale.min(crate::shared::constants::MAX_UPSCALE_FACTOR);
+            } else {
+                scale = 1.0;
+            }
+        }
+
+        let resize_alg = if scale < 1.0 {
+            // Hamming gives near-bicubic downscale quality at bilinear-class speed.
+            fr::ResizeAlg::Convolution(fr::FilterType::Hamming)
+        } else if scale <= 1.2 {
+            fr::ResizeAlg::Convolution(fr::FilterType::Bilinear)
+        } else {
+            fr::ResizeAlg::Convolution(fr::FilterType::CatmullRom)
+        };
 
         #[cfg(target_os = "macos")]
         imgproc::cvt_color(
@@ -192,6 +214,40 @@ impl VideoDecoder {
         let src_bytes = self.rgb_mat.data_bytes()?;
         let src_image = ImageRef::new(orig_w, orig_h, src_bytes, fr::PixelType::U8x3)?;
 
+        // Fill mode can skip intermediate oversized buffers by cropping source ratio directly
+        // into destination dimensions and resizing in one pass.
+        let can_fill_without_forced_upscale =
+            self.allow_upscale || (self.width <= orig_w && self.height <= orig_h);
+        if self.fill_mode && can_fill_without_forced_upscale {
+            let out_len = (self.width * self.height * 3) as usize;
+            if buffer.len() != out_len {
+                buffer.resize(out_len, 0);
+            }
+
+            let mut dst_image = Image::from_slice_u8(
+                self.width,
+                self.height,
+                buffer.as_mut_slice(),
+                fr::PixelType::U8x3,
+            )?;
+            let options = fr::ResizeOptions::new()
+                .resize_alg(resize_alg)
+                .fit_into_destination(Some((0.5, 0.5)));
+            self.resizer
+                .resize(&src_image, &mut dst_image, Some(&options))?;
+
+            let resize_time = start_resize.elapsed();
+            self.record_perf(
+                start_total.elapsed(),
+                decode_time,
+                resize_time,
+                Duration::ZERO,
+            );
+            return Ok(true);
+        }
+
+        let new_w = ((orig_w as f64 * scale).round() as u32).max(1);
+        let new_h = ((orig_h as f64 * scale).round() as u32).max(1);
         let resized_len = (new_w * new_h * 3) as usize;
         if self.resized_buffer.len() != resized_len {
             self.resized_buffer.resize(resized_len, 0);
@@ -203,7 +259,9 @@ impl VideoDecoder {
                 self.resized_buffer.as_mut_slice(),
                 fr::PixelType::U8x3,
             )?;
-            self.resizer.resize(&src_image, &mut dst_image, None)?;
+            let options = fr::ResizeOptions::new().resize_alg(resize_alg);
+            self.resizer
+                .resize(&src_image, &mut dst_image, Some(&options))?;
         }
         let resize_time = start_resize.elapsed();
 

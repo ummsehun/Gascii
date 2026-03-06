@@ -4,6 +4,7 @@ use std::backtrace::Backtrace;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -24,7 +25,7 @@ fn append_line(path: &str, line: &str) {
 }
 
 pub fn init() {
-    let mut error_path = std::env::current_dir().unwrap_or_default();
+    let mut error_path = resolve_log_base_dir();
     error_path.push(constants::ERROR_LOG_FILE);
 
     let mut debug_path = PathBuf::from(&error_path);
@@ -82,6 +83,41 @@ pub fn init() {
         let _ = crossterm::terminal::disable_raw_mode();
         println!("Application crashed. See {} for details.", paths.error_path);
     }));
+}
+
+fn resolve_log_base_dir() -> PathBuf {
+    if let Ok(root) = std::env::var("GASCII_PROJECT_ROOT") {
+        let p = PathBuf::from(root);
+        if p.exists() {
+            return p;
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(root) = find_project_root(exe.parent()) {
+            return root;
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = find_project_root(Some(&cwd)) {
+            return root;
+        }
+        return cwd;
+    }
+
+    PathBuf::from(".")
+}
+
+fn find_project_root(start: Option<&Path>) -> Option<PathBuf> {
+    let mut cursor = start;
+    while let Some(dir) = cursor {
+        if dir.join(constants::GASCCI_CONFIG_FILE).exists() || dir.join("Cargo.toml").exists() {
+            return Some(dir.to_path_buf());
+        }
+        cursor = dir.parent();
+    }
+    None
 }
 
 pub fn log(level: &str, msg: &str) {

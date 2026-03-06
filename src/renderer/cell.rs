@@ -3,7 +3,7 @@
 pub struct RgbColor(pub u8, pub u8, pub u8);
 
 /// Represents a single character cell on the terminal
-/// 
+///
 /// Uses TrueColor (RGB) for maximum quality
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CellData {
