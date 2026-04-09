@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-const DEFAULT_QUEUE_CAPACITY: usize = 120;
-const FALLBACK_RESIZE_POLL: Duration = Duration::from_millis(250);
+const DEFAULT_QUEUE_CAPACITY: usize = 16;
+const FALLBACK_RESIZE_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportMode {
@@ -108,6 +108,23 @@ impl ViewportLayout {
     }
 }
 
+impl ViewportLayout {
+    fn recentered_for_terminal(self, terminal_cols: u16, terminal_rows: u16) -> Self {
+        let terminal_cols = terminal_cols.max(1);
+        let terminal_rows = terminal_rows.max(1);
+        let char_width = self.pixel_width as u16;
+        let char_height = (self.pixel_height / 2) as u16;
+
+        Self {
+            terminal_cols,
+            terminal_rows,
+            offset_x: (terminal_cols.saturating_sub(char_width)) / 2,
+            offset_y: (terminal_rows.saturating_sub(char_height)) / 2,
+            ..self
+        }
+    }
+}
+
 fn fit_aspect_16_9(max_width: u32, max_height: u32) -> (u32, u32) {
     let max_width = max_width.max(1);
     let max_height = make_even(max_height.max(2));
@@ -197,6 +214,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
     let started_at = Instant::now();
     let mut last_resize_probe = Instant::now();
     let mut last_terminal_size = (layout.terminal_cols, layout.terminal_rows);
+    let mut pending_layout: Option<ViewportLayout> = None;
     let mut future_frame = Some(pending_future);
 
     loop {
@@ -210,17 +228,15 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
                 }
                 Event::Resize(cols, rows) => {
                     last_terminal_size = (cols, rows);
-                    relayout(
+                    handle_resize(
                         &config,
                         &mut display,
                         &target,
                         &mut layout,
-                        &mut processor,
-                        &mut cell_buffer,
+                        &mut pending_layout,
                         cols,
                         rows,
                     )?;
-                    future_frame = None;
                 }
                 _ => {}
             }
@@ -230,17 +246,15 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
             let current_size = DisplayManager::current_terminal_size_chars()?;
             if current_size != last_terminal_size {
                 last_terminal_size = current_size;
-                relayout(
+                handle_resize(
                     &config,
                     &mut display,
                     &target,
                     &mut layout,
-                    &mut processor,
-                    &mut cell_buffer,
+                    &mut pending_layout,
                     current_size.0,
                     current_size.1,
                 )?;
-                future_frame = None;
             }
             last_resize_probe = Instant::now();
         }
@@ -249,11 +263,25 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         let mut frame_to_render = None;
 
         if let Some(frame) = future_frame.take() {
-            if frame.width == layout.pixel_width && frame.height == layout.pixel_height {
-                if frame.timestamp <= playback_time {
-                    frame_to_render = Some(frame);
+            if let Some(processed_frame) = classify_frame(
+                frame,
+                &mut display,
+                &target,
+                &mut layout,
+                &mut pending_layout,
+                &mut processor,
+                &mut cell_buffer,
+            )? {
+                if processed_frame.width == layout.pixel_width
+                    && processed_frame.height == layout.pixel_height
+                {
+                    if processed_frame.timestamp <= playback_time {
+                        frame_to_render = Some(processed_frame);
+                    } else {
+                        future_frame = Some(processed_frame);
+                    }
                 } else {
-                    future_frame = Some(frame);
+                    frames_dropped += 1;
                 }
             }
         }
@@ -261,10 +289,18 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         loop {
             match frame_receiver.try_recv() {
                 Ok(frame) => {
-                    if frame.width != layout.pixel_width || frame.height != layout.pixel_height {
+                    let Some(frame) = classify_frame(
+                        frame,
+                        &mut display,
+                        &target,
+                        &mut layout,
+                        &mut pending_layout,
+                        &mut processor,
+                        &mut cell_buffer,
+                    )? else {
                         frames_dropped += 1;
                         continue;
-                    }
+                    };
 
                     if frame.timestamp <= playback_time {
                         if frame_to_render.is_some() {
@@ -333,27 +369,13 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
 }
 
 fn relayout(
-    config: &PlaybackConfig,
     display: &mut DisplayManager,
     target: &Arc<RwLock<RenderTarget>>,
     layout: &mut ViewportLayout,
     processor: &mut FrameProcessor,
     cell_buffer: &mut Vec<CellData>,
-    cols: u16,
-    rows: u16,
+    next_layout: ViewportLayout,
 ) -> Result<()> {
-    let next_layout = ViewportLayout::calculate(
-        cols,
-        rows,
-        config.viewport_mode,
-        config.requested_width,
-        config.requested_height,
-    );
-
-    if next_layout == *layout {
-        return Ok(());
-    }
-
     *layout = next_layout;
     {
         let mut guard = target
@@ -367,6 +389,83 @@ fn relayout(
         vec![CellData::default(); layout.pixel_width as usize * (layout.pixel_height as usize / 2)];
     display.invalidate_cache();
     Ok(())
+}
+
+fn handle_resize(
+    config: &PlaybackConfig,
+    display: &mut DisplayManager,
+    target: &Arc<RwLock<RenderTarget>>,
+    layout: &mut ViewportLayout,
+    pending_layout: &mut Option<ViewportLayout>,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
+    let next_layout = ViewportLayout::calculate(
+        cols,
+        rows,
+        config.viewport_mode,
+        config.requested_width,
+        config.requested_height,
+    );
+
+    let recentered = (*layout).recentered_for_terminal(cols, rows);
+    let desired_changed = next_layout.pixel_width != layout.pixel_width
+        || next_layout.pixel_height != layout.pixel_height;
+    let offset_changed = recentered.terminal_cols != layout.terminal_cols
+        || recentered.terminal_rows != layout.terminal_rows
+        || recentered.offset_x != layout.offset_x
+        || recentered.offset_y != layout.offset_y;
+
+    if !desired_changed && !offset_changed {
+        return Ok(());
+    }
+
+    if offset_changed {
+        *layout = recentered;
+        display.invalidate_cache();
+    }
+
+    if desired_changed {
+        let mut guard = target
+            .write()
+            .map_err(|_| anyhow!("render target lock poisoned"))?;
+        *guard = RenderTarget::new(next_layout.pixel_width, next_layout.pixel_height);
+        *pending_layout = Some(next_layout);
+    }
+
+    Ok(())
+}
+
+fn classify_frame(
+    frame: crate::decoder::FrameData,
+    display: &mut DisplayManager,
+    target: &Arc<RwLock<RenderTarget>>,
+    layout: &mut ViewportLayout,
+    pending_layout: &mut Option<ViewportLayout>,
+    processor: &mut FrameProcessor,
+    cell_buffer: &mut Vec<CellData>,
+) -> Result<Option<crate::decoder::FrameData>> {
+    if frame.width == layout.pixel_width && frame.height == layout.pixel_height {
+        return Ok(Some(frame));
+    }
+
+    if let Some(next_layout) = pending_layout {
+        if frame.width == next_layout.pixel_width && frame.height == next_layout.pixel_height {
+            let next_layout = *next_layout;
+            *pending_layout = None;
+            relayout(
+                display,
+                target,
+                layout,
+                processor,
+                cell_buffer,
+                next_layout,
+            )?;
+            return Ok(Some(frame));
+        }
+    }
+
+    Ok(None)
 }
 
 fn wait_for_resized_frame(

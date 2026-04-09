@@ -40,6 +40,16 @@ fn normalize_terminal_size(mut term_cols: u16, mut term_rows: u16) -> (u16, u16)
     (term_cols.max(1), term_rows.max(1))
 }
 
+fn ascii_char_for(cell: &CellData) -> char {
+    let top = (cell.fg.0 as u32 * 299 + cell.fg.1 as u32 * 587 + cell.fg.2 as u32 * 114) / 1000;
+    let bottom =
+        (cell.bg.0 as u32 * 299 + cell.bg.1 as u32 * 587 + cell.bg.2 as u32 * 114) / 1000;
+    let brightness = ((top + bottom) / 2).min(255);
+    const ASCII_CHARS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+    let char_idx = ((brightness * (ASCII_CHARS.len() as u32 - 1)) / 255) as usize;
+    ASCII_CHARS[char_idx]
+}
+
 impl DisplayManager {
     pub fn new(mode: DisplayMode) -> Result<Self> {
         // Use BufWriter
@@ -210,13 +220,17 @@ impl DisplayManager {
         // OPTIMIZATION: Unified loop for both redraw and diff
         for (i, cell) in cells.iter().enumerate() {
             let old_cell = &last_cells[i];
-
-            let is_different = if force_redraw {
-                true
-            } else if cell.char != old_cell.char {
-                true
-            } else {
-                cell.fg != old_cell.fg || cell.bg != old_cell.bg
+            let is_different = match self.mode {
+                DisplayMode::Rgb => {
+                    if force_redraw {
+                        true
+                    } else if cell.char != old_cell.char {
+                        true
+                    } else {
+                        cell.fg != old_cell.fg || cell.bg != old_cell.bg
+                    }
+                }
+                DisplayMode::Ascii => force_redraw || ascii_char_for(cell) != old_cell.char,
             };
 
             if is_different {
@@ -272,28 +286,17 @@ impl DisplayManager {
                         }
                     }
                     DisplayMode::Ascii => {
-                        // ASCII mode: No colors, convert to grayscale ASCII art
-                        // Convert RGB to grayscale brightness: 0.299*R + 0.587*G + 0.114*B
-                        // We use the foreground color for brightness calculation
-                        let brightness = (cell.fg.0 as u32 * 299
-                            + cell.fg.1 as u32 * 587
-                            + cell.fg.2 as u32 * 114)
-                            / 1000;
-
-                        // ASCII character set from darkest to brightest
-                        const ASCII_CHARS: &[char] =
-                            &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
-
-                        // Map brightness (0-255) to character index (0-9)
-                        let char_idx =
-                            ((brightness * (ASCII_CHARS.len() as u32 - 1)) / 255) as usize;
-                        let ascii_char = ASCII_CHARS[char_idx];
+                        let ascii_char = ascii_char_for(cell);
 
                         // Write the ASCII character directly (no color codes)
                         let mut b_dst = [0u8; 4];
                         buffer.extend_from_slice(ascii_char.encode_utf8(&mut b_dst).as_bytes());
 
-                        last_cells[i] = *cell;
+                        last_cells[i] = CellData {
+                            char: ascii_char,
+                            fg: (0, 0, 0),
+                            bg: (0, 0, 0),
+                        };
                         cursor_x += 1;
 
                         // Skip the normal character write below

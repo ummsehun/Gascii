@@ -24,54 +24,54 @@ struct Cli {
 enum Commands {
     /// Extract frames from video
     Extract {
-        #[arg(short, long)]
+        #[arg(short = 'i', long)]
         input: String,
-        #[arg(short, long)]
+        #[arg(short = 'o', long)]
         output_dir: String,
-        #[arg(short, long, default_value_t = 265)]
+        #[arg(short = 'w', long, default_value_t = 265)]
         width: u32,
-        #[arg(short, long, default_value_t = 65)]
+        #[arg(short = 'H', long, default_value_t = 65)]
         height: u32,
-        #[arg(short, long, default_value_t = 60)]
+        #[arg(short = 'p', long, default_value_t = 60)]
         fps: u32,
     },
     /// Play the animation
     Play {
-        #[arg(short, long)]
+        #[arg(short = 'd', long)]
         frames_dir: String,
-        #[arg(short, long)]
+        #[arg(short = 'a', long)]
         audio: Option<String>,
-        #[arg(short, long, default_value_t = 60)]
+        #[arg(short = 'p', long, default_value_t = 60)]
         fps: u32,
-        #[arg(short, long, value_enum, default_value_t = DisplayMode::Rgb)]
+        #[arg(short = 'm', long, value_enum, default_value_t = DisplayMode::Rgb)]
         mode: DisplayMode,
     },
     /// Play video directly (real-time, no extraction)
     PlayLive {
-        #[arg(short, long)]
+        #[arg(short = 'v', long)]
         video: String,
-        #[arg(short, long)]
+        #[arg(short = 'a', long)]
         audio: Option<String>,
         #[arg(
-            short,
+            short = 'w',
             long,
             default_value_t = 265,
             help = "Requested width in pixels for video scaling (applies to the decoder and processor)"
         )]
         width: u32,
         #[arg(
-            short,
+            short = 'H',
             long,
             default_value_t = 65,
             help = "Requested height in pixels for video scaling (applies to the decoder and processor)"
         )]
         height: u32,
-        #[arg(short, long, default_value_t = 0)]
+        #[arg(short = 'p', long, default_value_t = 0)]
         fps: u32,
-        #[arg(short, long, value_enum, default_value_t = DisplayMode::Rgb)]
+        #[arg(short = 'm', long, value_enum, default_value_t = DisplayMode::Rgb)]
         mode: DisplayMode,
         #[arg(
-            short,
+            short = 'F',
             long,
             default_value_t = false,
             help = "If true, Fill mode: crop to fill 16:9 box (center crop)"
