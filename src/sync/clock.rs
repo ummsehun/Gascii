@@ -14,8 +14,12 @@ pub struct MasterClock {
 impl MasterClock {
     /// Create a new master clock starting at time zero
     pub fn new() -> Self {
+        Self::from_start(Instant::now())
+    }
+
+    pub fn from_start(start: Instant) -> Self {
         Self {
-            start: Instant::now(),
+            start,
             paused: false,
             pause_time: None,
             total_pause_duration: Duration::ZERO,
@@ -62,6 +66,13 @@ impl MasterClock {
     /// Reset the clock to zero
     pub fn reset(&mut self) {
         self.start = Instant::now();
+        self.paused = false;
+        self.pause_time = None;
+        self.total_pause_duration = Duration::ZERO;
+    }
+
+    pub fn reset_from(&mut self, start: Instant) {
+        self.start = start;
         self.paused = false;
         self.pause_time = None;
         self.total_pause_duration = Duration::ZERO;

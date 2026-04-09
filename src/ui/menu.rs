@@ -1,3 +1,6 @@
+use crate::core::player::ViewportMode;
+use crate::renderer::DisplayMode;
+use crate::shared::constants;
 use anyhow::{Context, Result};
 use crossterm::{
     cursor::{Hide, Show},
@@ -19,15 +22,11 @@ use std::{
     time::Duration,
 };
 
-use crate::renderer::DisplayMode;
-use crate::shared::constants;
-
 type UiTerminal = Terminal<CrosstermBackend<io::Stderr>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     Splash,
-    FontSize,
     Video,
     Audio,
     Render,
@@ -39,7 +38,6 @@ impl Step {
     fn title(self) -> &'static str {
         match self {
             Step::Splash => "시작",
-            Step::FontSize => "폰트",
             Step::Video => "영상",
             Step::Audio => "오디오",
             Step::Render => "렌더링",
@@ -50,13 +48,12 @@ impl Step {
 
     fn progress(self) -> &'static str {
         match self {
-            Step::Splash => "0/6",
-            Step::FontSize => "1/6",
-            Step::Video => "2/6",
-            Step::Audio => "3/6",
-            Step::Render => "4/6",
-            Step::Screen => "5/6",
-            Step::Confirm => "6/6",
+            Step::Splash => "0/5",
+            Step::Video => "1/5",
+            Step::Audio => "2/5",
+            Step::Render => "3/5",
+            Step::Screen => "4/5",
+            Step::Confirm => "5/5",
         }
     }
 }
@@ -64,15 +61,14 @@ impl Step {
 pub struct MenuSelection {
     pub video_path: PathBuf,
     pub audio_path: Option<PathBuf>,
-    pub mode: DisplayMode,
-    pub fill_screen: bool,
+    pub display_mode: DisplayMode,
+    pub viewport_mode: ViewportMode,
 }
 
 struct MenuApp {
     step: Step,
     status: String,
     should_quit: bool,
-    font_input: String,
     video_files: Vec<PathBuf>,
     audio_files: Vec<PathBuf>,
     video_index: usize,
@@ -84,16 +80,12 @@ struct MenuApp {
 
 impl MenuApp {
     fn load() -> Result<Self> {
-        let video_files = scan_video_files()?;
-        let audio_files = scan_audio_files()?;
-
         Ok(Self {
             step: Step::Splash,
             status: "Enter로 시작, Esc로 종료".to_string(),
             should_quit: false,
-            font_input: read_current_font_size(),
-            video_files,
-            audio_files,
+            video_files: scan_video_files()?,
+            audio_files: scan_audio_files()?,
             video_index: 0,
             audio_index: 0,
             render_index: 0,
@@ -118,57 +110,15 @@ impl MenuApp {
         match self.step {
             Step::Splash => {
                 if key == KeyCode::Enter {
-                    self.step = Step::FontSize;
-                    self.status = "폰트 크기를 입력한 뒤 Enter를 누르세요".to_string();
+                    self.step = Step::Video;
+                    self.status = "재생할 비디오를 선택하세요".to_string();
                 }
             }
-            Step::FontSize => self.handle_font_input(key),
             Step::Video => self.handle_video_select(key),
             Step::Audio => self.handle_audio_select(key),
             Step::Render => self.handle_render_select(key),
             Step::Screen => self.handle_screen_select(key),
             Step::Confirm => self.handle_confirm(key),
-        }
-    }
-
-    fn handle_font_input(&mut self, key: KeyCode) {
-        match key {
-            KeyCode::Backspace => {
-                self.font_input.pop();
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
-                if c != '.' || !self.font_input.contains('.') {
-                    self.font_input.push(c);
-                }
-            }
-            KeyCode::Enter => {
-                if self.font_input.trim().is_empty() {
-                    self.status = "폰트 크기를 비워둘 수 없습니다".to_string();
-                    return;
-                }
-
-                let parsed = self.font_input.trim().parse::<f32>();
-                match parsed {
-                    Ok(v) if v > 0.0 => {
-                        if let Err(err) = write_font_size(&self.font_input) {
-                            self.status =
-                                format!("{} 저장 실패: {}", constants::GASCCI_CONFIG_FILE, err);
-                            return;
-                        }
-
-                        self.status = format!(
-                            "{} 폰트 크기 저장 완료: {}",
-                            constants::GASCCI_CONFIG_FILE,
-                            self.font_input
-                        );
-                        self.step = Step::Video;
-                    }
-                    _ => {
-                        self.status = "유효한 숫자(예: 2.5)를 입력하세요".to_string();
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -244,7 +194,7 @@ impl MenuApp {
             }
             KeyCode::Enter => {
                 self.step = Step::Confirm;
-                self.status = "Enter로 실행, Esc로 종료".to_string();
+                self.status = "Enter로 실행, Backspace로 이전 단계".to_string();
             }
             _ => {}
         }
@@ -257,12 +207,6 @@ impl MenuApp {
                 self.status = "화면 모드를 다시 선택하세요".to_string();
             }
             KeyCode::Enter => {
-                if self.video_files.is_empty() {
-                    self.status = "재생할 영상이 없습니다".to_string();
-                    self.should_quit = true;
-                    return;
-                }
-
                 self.selection = Some(MenuSelection {
                     video_path: self.video_files[self.video_index].clone(),
                     audio_path: if self.audio_index == 0 {
@@ -270,12 +214,16 @@ impl MenuApp {
                     } else {
                         Some(self.audio_files[self.audio_index - 1].clone())
                     },
-                    mode: if self.render_index == 0 {
+                    display_mode: if self.render_index == 0 {
                         DisplayMode::Rgb
                     } else {
                         DisplayMode::Ascii
                     },
-                    fill_screen: self.screen_index == 0,
+                    viewport_mode: if self.screen_index == 0 {
+                        ViewportMode::Fullscreen
+                    } else {
+                        ViewportMode::Cinema16x9
+                    },
                 });
                 self.should_quit = true;
             }
@@ -288,7 +236,7 @@ pub fn run_menu() -> Result<Option<MenuSelection>> {
     let mut app = MenuApp::load()?;
 
     if app.video_files.is_empty() {
-        eprintln!("❌ assets/video (또는 assets/vidio) 디렉토리에 비디오 파일이 없습니다.");
+        eprintln!("assets/video (또는 assets/vidio) 디렉토리에 비디오 파일이 없습니다.");
         return Ok(None);
     }
 
@@ -301,7 +249,6 @@ pub fn run_menu() -> Result<Option<MenuSelection>> {
     }
 
     run_result?;
-
     Ok(app.selection)
 }
 
@@ -312,9 +259,7 @@ fn setup_terminal() -> Result<UiTerminal> {
     execute!(stderr, EnterAlternateScreen, Hide).context("failed to switch to alternate screen")?;
 
     let backend = CrosstermBackend::new(stderr);
-    let terminal = Terminal::new(backend).context("failed to initialize terminal backend")?;
-
-    Ok(terminal)
+    Terminal::new(backend).context("failed to initialize terminal backend")
 }
 
 fn restore_terminal(terminal: &mut UiTerminal) -> Result<()> {
@@ -347,7 +292,6 @@ fn run_app(terminal: &mut UiTerminal, app: &mut MenuApp) -> Result<()> {
 
 fn draw_menu(frame: &mut Frame<'_>, app: &MenuApp) {
     let area = frame.size();
-
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         format!(
             " {} | {} ({}) ",
@@ -375,7 +319,6 @@ fn draw_menu(frame: &mut Frame<'_>, app: &MenuApp) {
 
     match app.step {
         Step::Splash => draw_splash(frame, layout[1]),
-        Step::FontSize => draw_font_input(frame, layout[1], app),
         Step::Video => draw_video_list(frame, layout[1], app),
         Step::Audio => draw_audio_list(frame, layout[1], app),
         Step::Render => draw_render_list(frame, layout[1], app),
@@ -407,11 +350,14 @@ fn draw_splash(frame: &mut Frame<'_>, area: Rect) {
     let content = Paragraph::new(vec![
         Line::from(""),
         Line::from(Span::styled(
-            "Ratatui 설정 메뉴",
+            "Gascii 설정 메뉴",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(""),
+        Line::from("폰트 설정 단계는 제거되었습니다."),
+        Line::from("터미널 Zoom In/Out 또는 창 크기 변경 시 재생 중 자동으로 다시 맞춰집니다."),
         Line::from(""),
         Line::from("Enter: 시작"),
         Line::from("Esc / q: 종료"),
@@ -422,51 +368,18 @@ fn draw_splash(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(content, area);
 }
 
-fn draw_font_input(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .title("폰트 크기 입력 (예: 2.5)");
-
-    let text = if app.font_input.is_empty() {
-        "_".to_string()
-    } else {
-        format!("{}_", app.font_input)
-    };
-
-    let input = Paragraph::new(text)
-        .block(input_block)
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(input, area);
-}
-
 fn draw_video_list(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
-    let items: Vec<ListItem<'_>> = app
+    let items = app
         .video_files
         .iter()
-        .map(|path| {
-            ListItem::new(Line::from(
-                path.file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.to_string_lossy().to_string()),
-            ))
-        })
-        .collect();
-
+        .map(path_to_list_item)
+        .collect::<Vec<_>>();
     draw_select_list(frame, area, "영상 선택", items, app.video_index);
 }
 
 fn draw_audio_list(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
     let mut items = vec![ListItem::new(constants::MENU_NO_AUDIO_LABEL)];
-    items.extend(app.audio_files.iter().map(|path| {
-        ListItem::new(
-            path.file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string_lossy().to_string()),
-        )
-    }));
-
+    items.extend(app.audio_files.iter().map(path_to_list_item));
     draw_select_list(frame, area, "오디오 선택", items, app.audio_index);
 }
 
@@ -475,7 +388,6 @@ fn draw_render_list(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
         .iter()
         .map(|item| ListItem::new(*item))
         .collect::<Vec<_>>();
-
     draw_select_list(frame, area, "렌더링 모드", items, app.render_index);
 }
 
@@ -484,42 +396,22 @@ fn draw_screen_list(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
         .iter()
         .map(|item| ListItem::new(*item))
         .collect::<Vec<_>>();
-
     draw_select_list(frame, area, "화면 모드", items, app.screen_index);
 }
 
 fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
-    let video = app.video_files[app.video_index]
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| {
-            app.video_files[app.video_index]
-                .to_string_lossy()
-                .to_string()
-        });
-
+    let video = display_name(&app.video_files[app.video_index]);
     let audio = if app.audio_index == 0 {
         constants::MENU_NO_AUDIO_LABEL.to_string()
     } else {
-        app.audio_files[app.audio_index - 1]
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                app.audio_files[app.audio_index - 1]
-                    .to_string_lossy()
-                    .to_string()
-            })
+        display_name(&app.audio_files[app.audio_index - 1])
     };
 
-    let mode = if app.render_index == 0 {
-        "rgb"
+    let mode = if app.render_index == 0 { "RGB" } else { "ASCII" };
+    let viewport = if app.screen_index == 0 {
+        "전체 화면"
     } else {
-        "ascii"
-    };
-    let fill_screen = if app.screen_index == 0 {
-        "true"
-    } else {
-        "false"
+        "영화관 화면 (16:9)"
     };
 
     let confirm = Paragraph::new(vec![
@@ -533,7 +425,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
         Line::from(format!("Video: {}", video)),
         Line::from(format!("Audio: {}", audio)),
         Line::from(format!("Mode: {}", mode)),
-        Line::from(format!("Fill: {}", fill_screen)),
+        Line::from(format!("Viewport: {}", viewport)),
         Line::from(""),
         Line::from("Enter: 실행   Backspace: 이전   Esc: 종료"),
     ])
@@ -567,7 +459,7 @@ fn draw_select_list(
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, status: &str) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(
-            "[↑↓/j,k] 이동  [Enter] 선택  [Esc/q] 종료  ",
+            "[↑↓/j,k] 이동  [Enter] 선택  [Backspace] 이전  [Esc/q] 종료  ",
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(status, Style::default().fg(Color::White)),
@@ -576,6 +468,16 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, status: &str) {
     .wrap(Wrap { trim: true });
 
     frame.render_widget(footer, area);
+}
+
+fn path_to_list_item(path: &PathBuf) -> ListItem<'_> {
+    ListItem::new(display_name(path))
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|file| file.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
 fn scan_video_files() -> Result<Vec<PathBuf>> {
@@ -621,57 +523,5 @@ fn has_allowed_extension(path: &Path, allowed: &[&str]) -> bool {
     };
 
     let ext = ext.to_ascii_lowercase();
-    allowed
-        .iter()
-        .any(|allowed_ext| *allowed_ext == ext.as_str())
-}
-
-fn read_current_font_size() -> String {
-    let config_path = Path::new(constants::GASCCI_CONFIG_FILE);
-
-    if let Ok(content) = fs::read_to_string(config_path) {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("font-size") {
-                if let Some(value) = trimmed.split('=').nth(1) {
-                    return value.trim().to_string();
-                }
-            }
-        }
-    }
-
-    constants::DEFAULT_FONT_SIZE.to_string()
-}
-
-fn write_font_size(font_size: &str) -> Result<()> {
-    let config_path = Path::new(constants::GASCCI_CONFIG_FILE);
-
-    let mut replaced = false;
-    let mut lines = if let Ok(content) = fs::read_to_string(config_path) {
-        content
-            .lines()
-            .map(|line| {
-                if line.trim_start().starts_with("font-size") {
-                    replaced = true;
-                    format!("font-size = {}", font_size.trim())
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    if !replaced {
-        lines.push(format!("font-size = {}", font_size.trim()));
-    }
-
-    let mut new_content = lines.join("\n");
-    new_content.push('\n');
-
-    fs::write(config_path, new_content)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-
-    Ok(())
+    allowed.iter().any(|allowed_ext| *allowed_ext == ext.as_str())
 }

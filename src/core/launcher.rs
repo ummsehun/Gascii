@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::time::Duration;
 
-use crate::renderer::DisplayMode;
+use crate::core::player::{PlaybackConfig, ViewportMode};
 use crate::shared::constants;
 
 pub fn run() -> Result<()> {
@@ -10,16 +10,20 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
 
-    let mode = match selection.mode {
-        DisplayMode::Rgb => "rgb",
-        DisplayMode::Ascii => "ascii",
+    let mode = match selection.display_mode {
+        crate::renderer::DisplayMode::Rgb => "rgb",
+        crate::renderer::DisplayMode::Ascii => "ascii",
+    };
+    let viewport = match selection.viewport_mode {
+        ViewportMode::Fullscreen => "fullscreen",
+        ViewportMode::Cinema16x9 => "cinema-16:9",
     };
 
     crate::utils::logger::info(&format!(
-        "launch selection: video={} mode={} fill={} audio={}",
+        "launch selection: video={} mode={} viewport={} audio={}",
         selection.video_path.display(),
         mode,
-        selection.fill_screen,
+        viewport,
         selection
             .audio_path
             .as_ref()
@@ -27,7 +31,7 @@ pub fn run() -> Result<()> {
             .unwrap_or_else(|| "<none>".to_string())
     ));
 
-    if selection.fill_screen {
+    if matches!(selection.viewport_mode, ViewportMode::Fullscreen) {
         crate::utils::terminal_control::request_fullscreen(true);
     } else {
         crate::utils::terminal_control::request_resize(
@@ -38,12 +42,15 @@ pub fn run() -> Result<()> {
 
     std::thread::sleep(Duration::from_millis(150));
 
-    crate::ui::interactive::run_game(
-        selection.video_path,
-        selection.audio_path,
-        selection.mode,
-        selection.fill_screen,
-    )?;
+    crate::core::player::play(PlaybackConfig {
+        video_path: selection.video_path,
+        audio_path: selection.audio_path,
+        requested_width: None,
+        requested_height: None,
+        requested_fps: None,
+        display_mode: selection.display_mode,
+        viewport_mode: selection.viewport_mode,
+    })?;
 
     Ok(())
 }

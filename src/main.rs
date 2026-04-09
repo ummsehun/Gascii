@@ -1,14 +1,10 @@
 mod core;
-mod utils;
-
-// New direct module imports
-mod analyzer;
-mod audio;
 mod decoder;
 mod renderer;
 mod shared;
 mod sync;
 mod ui;
+mod utils;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -16,8 +12,6 @@ use std::io::IsTerminal;
 
 use crate::core::extractor;
 use crate::renderer::DisplayMode;
-
-// New module imports
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -129,22 +123,27 @@ fn main() -> Result<()> {
         Commands::PlayLive {
             video,
             audio,
-            width: _,
-            height: _,
-            fps: _,
+            width,
+            height,
+            fps,
             mode,
             fill,
         } => {
-            let video_path = std::path::PathBuf::from(video);
-            let audio_path = audio.as_ref().map(|p| std::path::PathBuf::from(p));
-
-            crate::ui::interactive::run_game(video_path, audio_path, *mode, *fill)?;
+            crate::core::player::play(crate::core::player::PlaybackConfig {
+                video_path: std::path::PathBuf::from(video),
+                audio_path: audio.as_ref().map(std::path::PathBuf::from),
+                requested_width: Some(*width),
+                requested_height: Some(*height),
+                requested_fps: if *fps > 0 { Some(*fps) } else { None },
+                display_mode: *mode,
+                viewport_mode: if *fill {
+                    crate::core::player::ViewportMode::Fullscreen
+                } else {
+                    crate::core::player::ViewportMode::Cinema16x9
+                },
+            })?;
         }
         Commands::Detect => {
-            // Detect command has no input field in the struct definition I saw?
-            // Wait, let me check the struct definition again.
-            // Line 79: Detect,
-            // So it has no fields.
             let info = crate::utils::platform::PlatformInfo::detect()?;
             println!("{}", serde_json::to_string_pretty(&info)?);
         }

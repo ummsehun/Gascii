@@ -3,6 +3,7 @@ use rodio::{Decoder, OutputStream, Sink};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub struct AudioManager {
     _stream: OutputStream,
@@ -22,7 +23,7 @@ impl AudioManager {
         })
     }
 
-    pub fn play(&self, path: &str) -> Result<()> {
+    pub fn play(&self, path: &str) -> Result<Instant> {
         let file = File::open(path).with_context(|| format!("Failed to open audio file: {}", path))?;
         let source = Decoder::new(BufReader::new(file)).context("Failed to decode audio")?;
         
@@ -32,7 +33,17 @@ impl AudioManager {
         }
         sink.append(source);
         sink.play();
+        Ok(Instant::now())
+    }
+
+    pub fn stop(&self) -> Result<()> {
+        let sink = self.sink.lock().map_err(|_| anyhow::anyhow!("Audio sink mutex poisoned"))?;
+        sink.stop();
         Ok(())
     }
 
+    pub fn is_finished(&self) -> Result<bool> {
+        let sink = self.sink.lock().map_err(|_| anyhow::anyhow!("Audio sink mutex poisoned"))?;
+        Ok(sink.empty())
+    }
 }

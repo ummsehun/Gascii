@@ -1,261 +1,432 @@
-use anyhow::{Result, Context};
-use crossterm::terminal;
-use std::time::{Duration, Instant};
-use std::thread;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use crate::renderer::{DisplayManager, DisplayMode, FrameProcessor};
-use crate::decoder::VideoDecoder;
 use crate::core::audio_manager::AudioManager;
-use crate::core::frame_buffer::FrameBuffer;
+use crate::decoder::{RenderTarget, ScaleMode, VideoDecoder};
+use crate::renderer::{DisplayManager, DisplayMode, FrameProcessor};
+use crate::renderer::cell::CellData;
+use crate::sync::MasterClock;
+use anyhow::{anyhow, Result};
+use crossterm::event::{self, Event, KeyCode};
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
-pub fn play_realtime(
-    video_path: &str,
-    audio_path: Option<&str>,
-    width: u32,
-    height: u32,
-    fps: u32,
-    mode: DisplayMode,
-    fill: bool,
-) -> Result<()> {
-    // 1. Initialize Display & Audio
-    let mut display = DisplayManager::new(mode)?;
-    let audio = AudioManager::new()?;
+const DEFAULT_QUEUE_CAPACITY: usize = 120;
+const FALLBACK_RESIZE_POLL: Duration = Duration::from_millis(250);
 
-    // Keep requested values mutable for possible clamping
-    let mut req_width = width;
-    let mut req_height = height;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportMode {
+    Fullscreen,
+    Cinema16x9,
+}
 
-    // 2. Start Audio
-    if let Some(path) = audio_path {
-        audio.play(path)?;
-    }
+#[derive(Debug, Clone)]
+pub struct PlaybackConfig {
+    pub video_path: PathBuf,
+    pub audio_path: Option<PathBuf>,
+    pub requested_width: Option<u32>,
+    pub requested_height: Option<u32>,
+    pub requested_fps: Option<u32>,
+    pub display_mode: DisplayMode,
+    pub viewport_mode: ViewportMode,
+}
 
-    // 2.1 Ensure width/height fit in the terminal; clamp to Display size
-    {
-        let (term_cols, term_rows) = display.terminal_size_chars()?;
-        let max_img_w = term_cols as u32;
-        let max_img_h = (term_rows as u32) * 2;
-        if req_width > max_img_w || req_height > max_img_h {
-            // Compute scale to fit
-            let scale_w = max_img_w as f64 / width as f64;
-            let scale_h = max_img_h as f64 / height as f64;
-            let scale = scale_w.min(scale_h);
-            let new_w = (req_width as f64 * scale).floor() as u32;
-            let new_h = (req_height as f64 * scale).floor() as u32;
-            eprintln!("⚠️  Requested video size {}x{} is larger than terminal max {}x{}: scaling to {}x{}",
-                      width, height, max_img_w, max_img_h, new_w, new_h);
-            // Replace width/height
-            // NOTE: For safety we set to max 1
-            req_width = new_w.max(1);
-            req_height = new_h.max(1);
-            // We'll shadow the local vars by using req_width/req_height for the rest of the function
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportLayout {
+    pub terminal_cols: u16,
+    pub terminal_rows: u16,
+    pub offset_x: u16,
+    pub offset_y: u16,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+}
+
+impl ViewportLayout {
+    fn calculate(
+        terminal_cols: u16,
+        terminal_rows: u16,
+        viewport_mode: ViewportMode,
+        requested_width: Option<u32>,
+        requested_height: Option<u32>,
+    ) -> Self {
+        let terminal_cols = terminal_cols.max(1);
+        let terminal_rows = terminal_rows.max(1);
+
+        let max_pixel_width = terminal_cols as u32;
+        let max_pixel_height = (terminal_rows as u32).saturating_mul(2).max(2);
+
+        let (pixel_width, pixel_height) = match viewport_mode {
+            ViewportMode::Fullscreen => {
+                let width = requested_width
+                    .map(|value| value.min(max_pixel_width).max(1))
+                    .unwrap_or(max_pixel_width);
+                let height = requested_height
+                    .map(|value| value.min(max_pixel_height).max(2))
+                    .unwrap_or(max_pixel_height);
+                (width.max(1), make_even(height.max(2)))
+            }
+            ViewportMode::Cinema16x9 => {
+                let fitted_width = max_pixel_width;
+                let fitted_height = make_even(
+                    ((fitted_width as f64 / (16.0 / 9.0)).floor() as u32)
+                        .min(max_pixel_height)
+                        .max(2),
+                );
+
+                let (bounded_width, bounded_height) = if fitted_height > max_pixel_height {
+                    let height = max_pixel_height;
+                    let width = ((height as f64 * (16.0 / 9.0)).floor() as u32)
+                        .min(max_pixel_width)
+                        .max(1);
+                    (width, height)
+                } else {
+                    (fitted_width, fitted_height)
+                };
+
+                let limit_width = requested_width
+                    .map(|value| value.min(bounded_width).max(1))
+                    .unwrap_or(bounded_width);
+                let limit_height = requested_height
+                    .map(|value| value.min(bounded_height).max(2))
+                    .unwrap_or(bounded_height);
+
+                fit_aspect_16_9(limit_width, limit_height)
+            }
+        };
+
+        let char_width = pixel_width as u16;
+        let char_height = (pixel_height / 2) as u16;
+        let offset_x = ((terminal_cols.saturating_sub(char_width)) / 2).max(0);
+        let offset_y = ((terminal_rows.saturating_sub(char_height)) / 2).max(0);
+
+        Self {
+            terminal_cols,
+            terminal_rows,
+            offset_x,
+            offset_y,
+            pixel_width,
+            pixel_height,
         }
     }
+}
 
-    // 3. Start Video Decoder
-    // println!("Initializing video decoder with target: {}x{}... fill={}", req_width, req_height, fill);
-    let mut decoder = VideoDecoder::new(video_path, req_width, req_height, fill)?;
-    let actual_fps = decoder.get_fps();
-    // println!("Video decoder started. Detected FPS: {:.2}", actual_fps);
-    
-    // 4. Initialize Frame Processor (Rayon)
-    let processor = FrameProcessor::new(req_width as usize, req_height as usize);
+fn fit_aspect_16_9(max_width: u32, max_height: u32) -> (u32, u32) {
+    let max_width = max_width.max(1);
+    let max_height = make_even(max_height.max(2));
+    let aspect = 16.0 / 9.0;
+    let width_from_height = ((max_height as f64) * aspect).floor() as u32;
 
-    // 5. Create Ring Buffer (2 seconds)
-    let buffer_capacity = (actual_fps * 2.0) as usize;
-    let frame_buffer = FrameBuffer::new(buffer_capacity);
-    let queue = frame_buffer.clone_queue();
+    if width_from_height <= max_width {
+        (width_from_height.max(1), max_height)
+    } else {
+        let width = max_width;
+        let height = make_even(((width as f64) / aspect).floor() as u32).max(2);
+        (width.max(1), height)
+    }
+}
 
-    // 6. Spawn OpenCV Reader Thread (Producer)
-    let running_reader = Arc::new(AtomicBool::new(true));
-    let r_clone = running_reader.clone();
-    
-    let reader_handle = thread::spawn(move || {
-        let mut frames_read = 0u64;
-        
-        while r_clone.load(Ordering::SeqCst) {
-            match decoder.read_frame() {
-                Ok(Some(buffer)) => {
-                    // BLOCKING push: Wait until buffer has space without cloning frames.
-                    let mut buf = buffer;
-                    loop {
-                        match queue.push(buf) {
-                            Ok(()) => break,
-                            Err(returned_buf) => {
-                                // Buffer full - wait for consumer to catch up
-                                buf = returned_buf;
-                                thread::sleep(Duration::from_micros(100));
-                                // Check if we should exit
-                                if !r_clone.load(Ordering::SeqCst) {
-                                    return;
-                                }
-                            }
+fn make_even(value: u32) -> u32 {
+    let clamped = value.max(2);
+    if clamped % 2 == 0 {
+        clamped
+    } else {
+        clamped - 1
+    }
+}
+
+pub fn play(config: PlaybackConfig) -> Result<()> {
+    let mut display = DisplayManager::new(config.display_mode)?;
+    let (term_cols, term_rows) = DisplayManager::current_terminal_size_chars()?;
+    let mut layout = ViewportLayout::calculate(
+        term_cols,
+        term_rows,
+        config.viewport_mode,
+        config.requested_width,
+        config.requested_height,
+    );
+
+    let target = Arc::new(RwLock::new(RenderTarget::new(
+        layout.pixel_width,
+        layout.pixel_height,
+    )));
+    let scale_mode = match config.viewport_mode {
+        ViewportMode::Fullscreen => ScaleMode::CropToFill,
+        ViewportMode::Cinema16x9 => ScaleMode::Fit,
+    };
+
+    let decoder = VideoDecoder::new(
+        config.video_path.to_string_lossy().as_ref(),
+        target.clone(),
+        scale_mode,
+    )?;
+    let source_fps = decoder.get_fps();
+    let playback_fps = config
+        .requested_fps
+        .filter(|value| *value > 0)
+        .map(|value| value as f64)
+        .unwrap_or(source_fps);
+
+    let (frame_sender, frame_receiver) = crossbeam_channel::bounded(DEFAULT_QUEUE_CAPACITY);
+    let decoder_handle = decoder.spawn_decoding_thread(frame_sender, playback_fps);
+
+    let mut processor = FrameProcessor::new(layout.pixel_width as usize, layout.pixel_height as usize);
+    let mut cell_buffer =
+        vec![CellData::default(); layout.pixel_width as usize * (layout.pixel_height as usize / 2)];
+
+    let mut pending_future = frame_receiver
+        .recv_timeout(Duration::from_secs(3))
+        .map_err(|_| anyhow!("Failed to receive first decoded frame"))?;
+
+    if pending_future.width != layout.pixel_width || pending_future.height != layout.pixel_height {
+        pending_future = wait_for_resized_frame(&frame_receiver, layout.pixel_width, layout.pixel_height)?;
+    }
+
+    let audio_manager = if config.audio_path.is_some() {
+        Some(AudioManager::new()?)
+    } else {
+        None
+    };
+    let clock_start = if let (Some(audio), Some(audio_path)) = (&audio_manager, &config.audio_path) {
+        audio.play(audio_path.to_string_lossy().as_ref())?
+    } else {
+        Instant::now()
+    };
+    let clock = MasterClock::from_start(clock_start);
+
+    let mut frames_rendered = 0u64;
+    let mut frames_dropped = 0u64;
+    let mut decoder_disconnected = false;
+    let started_at = Instant::now();
+    let mut last_resize_probe = Instant::now();
+    let mut last_terminal_size = (layout.terminal_cols, layout.terminal_rows);
+    let mut future_frame = Some(pending_future);
+
+    loop {
+        while event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) => {
+                    if let Some(audio) = &audio_manager {
+                        let _ = audio.stop();
+                    }
+                    return finalize(decoder_handle, frames_rendered, frames_dropped, started_at);
+                }
+                Event::Resize(cols, rows) => {
+                    last_terminal_size = (cols, rows);
+                    relayout(
+                        &config,
+                        &mut display,
+                        &target,
+                        &mut layout,
+                        &mut processor,
+                        &mut cell_buffer,
+                        cols,
+                        rows,
+                    )?;
+                    future_frame = None;
+                }
+                _ => {}
+            }
+        }
+
+        if last_resize_probe.elapsed() >= FALLBACK_RESIZE_POLL {
+            let current_size = DisplayManager::current_terminal_size_chars()?;
+            if current_size != last_terminal_size {
+                last_terminal_size = current_size;
+                relayout(
+                    &config,
+                    &mut display,
+                    &target,
+                    &mut layout,
+                    &mut processor,
+                    &mut cell_buffer,
+                    current_size.0,
+                    current_size.1,
+                )?;
+                future_frame = None;
+            }
+            last_resize_probe = Instant::now();
+        }
+
+        let playback_time = clock.elapsed();
+        let mut frame_to_render = None;
+
+        if let Some(frame) = future_frame.take() {
+            if frame.width == layout.pixel_width && frame.height == layout.pixel_height {
+                if frame.timestamp <= playback_time {
+                    frame_to_render = Some(frame);
+                } else {
+                    future_frame = Some(frame);
+                }
+            }
+        }
+
+        loop {
+            match frame_receiver.try_recv() {
+                Ok(frame) => {
+                    if frame.width != layout.pixel_width || frame.height != layout.pixel_height {
+                        frames_dropped += 1;
+                        continue;
+                    }
+
+                    if frame.timestamp <= playback_time {
+                        if frame_to_render.is_some() {
+                            frames_dropped += 1;
+                        }
+                        frame_to_render = Some(frame);
+                    } else {
+                        future_frame = Some(frame);
+                        break;
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    decoder_disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if frame_to_render.is_none() {
+            if let Some(frame) = future_frame.take() {
+                if frame.width == layout.pixel_width && frame.height == layout.pixel_height {
+                    if frame.timestamp > playback_time {
+                        let wait_time = frame.timestamp - playback_time;
+                        if wait_time > Duration::from_millis(1) {
+                            std::thread::sleep(wait_time);
                         }
                     }
-                    frames_read += 1;
-                }
-                Ok(None) => {
-                    // EOF
-                    println!("OpenCV reader: End of video");
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("Error reading frame: {}", e);
-                    break;
+                    frame_to_render = Some(frame);
                 }
             }
         }
-        
-        println!("OpenCV reader thread exited. Frames read: {}", frames_read);
-    });
 
-    // 7. Main Playback Loop (Consumer)
-    // Wait briefly for buffer to fill
-    thread::sleep(Duration::from_millis(200));
-    
-    // Warn if FPS mismatch
-    // Warn if FPS mismatch (only if user explicitly requested a specific FPS)
-    if fps > 0 && (actual_fps - fps as f64).abs() > 0.5 {
-        // println!("⚠️  FPS MISMATCH DETECTED:");
-        // println!("   User requested: {}fps", fps);
-        // println!("   Video actual:   {:.2}fps", actual_fps);
-        // println!("   Using actual video FPS for sync");
-    } else if fps == 0 {
-        // println!("ℹ️  Auto-detected Video FPS: {:.2}", actual_fps);
-    }
-    
-    let frame_duration = Duration::from_secs_f64(1.0 / actual_fps);
-    let start_time = Instant::now();
-    let mut frame_idx = 0u64;
+        if let Some(frame) = frame_to_render {
+            processor.process_frame_into(&frame.buffer, &mut cell_buffer);
+            display.render_diff(
+                &cell_buffer,
+                layout.pixel_width as usize,
+                layout.offset_x,
+                layout.offset_y,
+                layout.terminal_cols,
+                layout.terminal_rows,
+            )?;
+            frames_rendered += 1;
+            continue;
+        }
 
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-    })?;
-
-    // Performance metrics
-    let mut last_fps_report = Instant::now();
-    let mut frames_since_report = 0;
-    
-    // Precision timing tracking
-    let mut _last_frame_time = Instant::now();
-    let mut cumulative_drift = Duration::ZERO;
-    let mut max_drift = Duration::ZERO;
-    let mut total_sleep_time = Duration::ZERO;
-
-    while running.load(Ordering::SeqCst) {
-        // Input polling
-        if crossterm::event::poll(Duration::from_millis(0))? {
-             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                 if key.code == crossterm::event::KeyCode::Char('q') {
-                     break;
-                 }
-             }
-         }
-
-        // Try to get frame from buffer (non-blocking)
-        if let Some(buffer) = frame_buffer.pop() {
-            // ========== PRECISION TIMING SYSTEM ==========
-            // Calculate target time for this frame (nanosecond precision)
-            let target_time = start_time + frame_duration * (frame_idx as u32);
-            let now = Instant::now();
-            
-            // Calculate drift (how far off we are from ideal timing)
-            let drift = if now < target_time {
-                // We're ahead - need to sleep
-                target_time.duration_since(now)
-            } else {
-                // We're behind - no sleep, just track drift
-                Duration::ZERO
+        if decoder_disconnected {
+            let audio_done = match &audio_manager {
+                Some(audio) => audio.is_finished().unwrap_or(true),
+                None => true,
             };
-            
-            // Track maximum drift for diagnostics
-            if drift > max_drift {
-                max_drift = drift;
+            if audio_done {
+                break;
             }
-            cumulative_drift += drift;
-            
-            // ADAPTIVE SLEEP: Only sleep if drift is significant (>100μs)
-            // This prevents sleeping for tiny amounts which is inaccurate
-            if drift > Duration::from_micros(100) {
-                thread::sleep(drift);
-                total_sleep_time += drift;
-            }
-            
-            // Record actual frame time
-            let frame_start = Instant::now();
-
-            // Render
-            match mode {
-                DisplayMode::Rgb => {
-                    // 1. Process Frame (Parallel Quantization)
-                    let cells = processor.process_frame(&buffer);
-                    // 2. Render Diff (Optimized Output)
-                    display.render_diff(&cells, width as usize)?;
-                },
-                DisplayMode::Ascii => {
-                    // ASCII mode disabled
-                },
-            }
-
-            let frame_end = Instant::now();
-            let frame_render_time = frame_end.duration_since(frame_start);
-            
-            // Track frame timing
-            _last_frame_time = frame_end;
-            frame_idx += 1;
-            frames_since_report += 1;
-
-                // Report FPS and timing metrics every 2 seconds
-                if last_fps_report.elapsed() >= Duration::from_secs(2) {
-                    /*
-                    let elapsed = last_fps_report.elapsed().as_secs_f64();
-                    let fps_actual = frames_since_report as f64 / elapsed;
-                    let buffer_fill = frame_buffer.fill_level();
-                    let avg_drift = cumulative_drift.as_micros() / frames_since_report as u128;
-                    let avg_render = frame_render_time.as_micros();
-                    
-                    println!("FPS: {:.1}/{:.1} | Buffer: {:.0}% | Drift: {}μs (max: {}μs) | Render: {}μs | Frame: {}", 
-                             fps_actual, actual_fps, 
-                             buffer_fill * 100.0, 
-                             avg_drift,
-                             max_drift.as_micros(),
-                             avg_render,
-                             frame_idx);
-                    */
-                    last_fps_report = Instant::now();
-                    frames_since_report = 0;
-                    cumulative_drift = Duration::ZERO;
-                    max_drift = Duration::ZERO;
-                }
-        } else {
-            // Buffer empty - wait briefly
-            thread::sleep(Duration::from_micros(500));
         }
+
+        std::thread::sleep(Duration::from_millis(1));
     }
 
-    // 8. Cleanup
-    running_reader.store(false, Ordering::SeqCst);
-    reader_handle.join().ok();
+    if let Some(audio) = &audio_manager {
+        let _ = audio.stop();
+    }
 
-    let total_time = start_time.elapsed();
-    let expected_time = frame_duration * (frame_idx as u32);
-    let final_drift = if total_time > expected_time {
-        total_time - expected_time
-    } else {
-        expected_time - total_time
-    };
-    
-    println!("\n=== Playback Complete ===");
-    println!("Total frames: {}", frame_idx);
-    println!("Total time: {:.2}s", total_time.as_secs_f64());
-    println!("Expected time: {:.2}s", expected_time.as_secs_f64());
-    println!("Final drift: {:.3}s ({:.1}%)", 
-             final_drift.as_secs_f64(),
-             (final_drift.as_secs_f64() / expected_time.as_secs_f64()) * 100.0);
-    
+    finalize(decoder_handle, frames_rendered, frames_dropped, started_at)
+}
+
+fn relayout(
+    config: &PlaybackConfig,
+    display: &mut DisplayManager,
+    target: &Arc<RwLock<RenderTarget>>,
+    layout: &mut ViewportLayout,
+    processor: &mut FrameProcessor,
+    cell_buffer: &mut Vec<CellData>,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
+    let next_layout = ViewportLayout::calculate(
+        cols,
+        rows,
+        config.viewport_mode,
+        config.requested_width,
+        config.requested_height,
+    );
+
+    if next_layout == *layout {
+        return Ok(());
+    }
+
+    *layout = next_layout;
+    {
+        let mut guard = target
+            .write()
+            .map_err(|_| anyhow!("render target lock poisoned"))?;
+        *guard = RenderTarget::new(layout.pixel_width, layout.pixel_height);
+    }
+
+    *processor = FrameProcessor::new(layout.pixel_width as usize, layout.pixel_height as usize);
+    *cell_buffer =
+        vec![CellData::default(); layout.pixel_width as usize * (layout.pixel_height as usize / 2)];
+    display.invalidate_cache();
     Ok(())
+}
+
+fn wait_for_resized_frame(
+    receiver: &crossbeam_channel::Receiver<crate::decoder::FrameData>,
+    width: u32,
+    height: u32,
+) -> Result<crate::decoder::FrameData> {
+    loop {
+        let frame = receiver
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|_| anyhow!("Failed to receive resized frame"))?;
+        if frame.width == width && frame.height == height {
+            return Ok(frame);
+        }
+    }
+}
+
+fn finalize(
+    decoder_handle: std::thread::JoinHandle<Result<()>>,
+    frames_rendered: u64,
+    frames_dropped: u64,
+    started_at: Instant,
+) -> Result<()> {
+    let _ = decoder_handle.join();
+    let duration = started_at.elapsed();
+    println!("\n재생 완료");
+    println!("렌더링 프레임: {}", frames_rendered);
+    println!("드롭 프레임: {}", frames_dropped);
+    println!("재생 시간: {:.2}초", duration.as_secs_f64());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cinema_layout_keeps_16_9_ratio() {
+        let layout = ViewportLayout::calculate(240, 68, ViewportMode::Cinema16x9, None, None);
+        let ratio = layout.pixel_width as f64 / layout.pixel_height as f64;
+        assert!((ratio - (16.0 / 9.0)).abs() < 0.05);
+    }
+
+    #[test]
+    fn fullscreen_layout_uses_requested_limits() {
+        let layout = ViewportLayout::calculate(
+            240,
+            68,
+            ViewportMode::Fullscreen,
+            Some(120),
+            Some(80),
+        );
+        assert_eq!(layout.pixel_width, 120);
+        assert_eq!(layout.pixel_height, 80);
+    }
+
+    #[test]
+    fn cinema_layout_centers_output() {
+        let layout = ViewportLayout::calculate(200, 60, ViewportMode::Cinema16x9, None, None);
+        assert!(layout.offset_x > 0 || layout.offset_y > 0);
+        assert_eq!(layout.pixel_height % 2, 0);
+    }
 }

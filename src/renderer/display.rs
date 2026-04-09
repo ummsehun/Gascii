@@ -10,7 +10,7 @@ use std::io::{BufWriter, Stdout, Write};
 use super::cell::CellData;
 use crate::shared::constants;
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum DisplayMode {
     Ascii,
     Rgb,
@@ -21,6 +21,23 @@ pub struct DisplayManager {
     mode: DisplayMode,
     last_cells: Option<Vec<CellData>>,
     render_buffer: Vec<u8>,
+}
+
+fn normalize_terminal_size(mut term_cols: u16, mut term_rows: u16) -> (u16, u16) {
+    if let (Ok(cw_str), Ok(ch_str)) =
+        (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
+    {
+        if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
+            if term_cols > cw * 16 {
+                term_cols = (term_cols / cw).max(1);
+            }
+            if term_rows > ch * 8 {
+                term_rows = (term_rows / ch).max(1);
+            }
+        }
+    }
+
+    (term_cols.max(1), term_rows.max(1))
 }
 
 impl DisplayManager {
@@ -63,21 +80,13 @@ impl DisplayManager {
     }
 
     /// Return terminal size in character columns and rows, converting from pixels when needed.
-    pub fn terminal_size_chars(&self) -> Result<(u16, u16)> {
-        let (mut term_cols, mut term_rows) = terminal::size()?;
-        if let (Ok(cw_str), Ok(ch_str)) =
-            (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
-        {
-            if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
-                if term_cols > cw * 16 {
-                    term_cols = (term_cols / cw).max(1);
-                }
-                if term_rows > ch * 8 {
-                    term_rows = (term_rows / ch).max(1);
-                }
-            }
-        }
-        Ok((term_cols, term_rows))
+    pub fn current_terminal_size_chars() -> Result<(u16, u16)> {
+        let (term_cols, term_rows) = terminal::size()?;
+        Ok(normalize_terminal_size(term_cols, term_rows))
+    }
+
+    pub fn invalidate_cache(&mut self) {
+        self.last_cells = None;
     }
 
     // Helper for zero-allocation integer writing
@@ -139,7 +148,15 @@ impl DisplayManager {
     }
 
     // Optimized Diffing Renderer with Zero-Allocation
-    pub fn render_diff(&mut self, cells: &[CellData], width: usize) -> Result<()> {
+    pub fn render_diff(
+        &mut self,
+        cells: &[CellData],
+        width: usize,
+        offset_x: u16,
+        offset_y: u16,
+        terminal_cols: u16,
+        terminal_rows: u16,
+    ) -> Result<()> {
         let start_render = std::time::Instant::now();
 
         // Reuse buffer
@@ -167,38 +184,9 @@ impl DisplayManager {
         let mut last_fg: Option<(u8, u8, u8)> = None;
         let mut last_bg: Option<(u8, u8, u8)> = None;
 
-        // ... (centering logic) ...
-        let (mut term_cols, mut term_rows) = terminal::size().unwrap_or((80, 24));
-
-        // If environment provides CHAR_WIDTH/CHAR_HEIGHT (pixel size per char), convert if
-        // terminal::size returned pixel dimensions rather than char counts.
-        if let (Ok(cw_str), Ok(ch_str)) =
-            (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
-        {
-            if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
-                // If the terminal reports a very large value for term_cols/term_rows, assume it's pixels
-                if term_cols > cw * 16 {
-                    // threshold: more than ~16 columns per default
-                    term_cols = (term_cols / cw).max(1);
-                }
-                if term_rows > ch * 8 {
-                    term_rows = (term_rows / ch).max(1);
-                }
-            }
-        }
+        let (term_cols, term_rows) = normalize_terminal_size(terminal_cols, terminal_rows);
         let content_width = width as u16;
         let content_height = (cells.len() / width) as u16;
-
-        let offset_x = if term_cols > content_width {
-            (term_cols - content_width) / 2
-        } else {
-            0
-        };
-        let offset_y = if term_rows > content_height {
-            (term_rows - content_height) / 2
-        } else {
-            0
-        };
 
         // Track virtual cursor position
         let mut cursor_x: i32 = -1;

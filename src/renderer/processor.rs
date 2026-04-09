@@ -11,6 +11,7 @@ impl FrameProcessor {
         Self { width, height }
     }
 
+    #[cfg(test)]
     pub fn process_frame(&self, pixel_data: &[u8]) -> Vec<CellData> {
         let mut cells = vec![CellData::default(); self.width * (self.height / 2)];
         self.process_frame_into(pixel_data, &mut cells);
