@@ -1,17 +1,14 @@
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use crossterm::{
     cursor,
     style::Print,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 use std::io::{BufWriter, Stdout, Write};
 
 use super::backend::ActiveRenderBackend;
 use super::cell::CellData;
-use crate::utils::platform::TerminalCapabilities;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum DisplayMode {
@@ -30,15 +27,11 @@ pub struct RenderViewport {
 }
 
 impl RenderViewport {
-    pub fn content_rows(self) -> u16 {
-        (self.pixel_height / 2) as u16
-    }
 }
 
 pub struct DisplayManager {
     stdout: BufWriter<Stdout>,
     active_backend: ActiveRenderBackend,
-    capabilities: TerminalCapabilities,
     last_cells: Option<Vec<CellData>>,
     last_ascii: Option<Vec<char>>,
     render_buffer: Vec<u8>,
@@ -78,13 +71,11 @@ impl DisplayManager {
     pub fn new(
         _mode: DisplayMode,
         active_backend: ActiveRenderBackend,
-        capabilities: TerminalCapabilities,
     ) -> Result<Self> {
         let stdout = BufWriter::with_capacity(4 * 1024 * 1024, std::io::stdout());
         let mut dm = Self {
             stdout,
             active_backend,
-            capabilities,
             last_cells: None,
             last_ascii: None,
             render_buffer: Vec::with_capacity(4 * 1024 * 1024),
@@ -100,10 +91,7 @@ impl DisplayManager {
         self.stdout.execute(EnterAlternateScreen)?;
         self.stdout.execute(cursor::Hide)?;
         self.stdout.execute(Print("\x1b[?7l"))?;
-
-        if self.capabilities.supports_sync_output {
-            self.stdout.execute(Print("\x1b[?2026h"))?;
-        }
+        self.stdout.execute(Print("\x1b[?2026h"))?;
 
         self.stdout.execute(Print("\x1b[?12l"))?;
         self.stdout.flush()?;
@@ -185,11 +173,7 @@ impl DisplayManager {
     ) -> Result<()> {
         match self.active_backend {
             ActiveRenderBackend::AnsiAscii => self.render_ascii(rgb_buffer, viewport),
-            ActiveRenderBackend::AnsiRgb => {
-                self.render_rgb_diff(rgb_cells.unwrap_or(&[]), viewport)
-            }
-            ActiveRenderBackend::KittyGraphics => self.render_kitty(rgb_buffer, viewport),
-            ActiveRenderBackend::ITerm2Image => self.render_iterm2(rgb_buffer, viewport),
+            ActiveRenderBackend::AnsiRgb => self.render_rgb_diff(rgb_cells.unwrap_or(&[]), viewport),
         }
     }
 
@@ -205,9 +189,7 @@ impl DisplayManager {
         self.render_buffer.clear();
         let buffer = &mut self.render_buffer;
 
-        if self.capabilities.supports_sync_output {
-            buffer.extend_from_slice(b"\x1b[?2026h");
-        }
+        buffer.extend_from_slice(b"\x1b[?2026h");
 
         let last_ascii = self.last_ascii.get_or_insert_with(|| vec!['\0'; cell_count]);
         let mut force_redraw = false;
@@ -271,9 +253,7 @@ impl DisplayManager {
         }
 
         buffer.extend_from_slice(b"\x1b[0m");
-        if self.capabilities.supports_sync_output {
-            buffer.extend_from_slice(b"\x1b[?2026l");
-        }
+        buffer.extend_from_slice(b"\x1b[?2026l");
         self.stdout.write_all(buffer)?;
         self.stdout.flush()?;
         Ok(())
@@ -285,9 +265,7 @@ impl DisplayManager {
         self.render_buffer.clear();
         let buffer = &mut self.render_buffer;
 
-        if self.capabilities.supports_sync_output {
-            buffer.extend_from_slice(b"\x1b[?2026h");
-        }
+        buffer.extend_from_slice(b"\x1b[?2026h");
 
         let mut force_redraw = false;
         if self.last_cells.as_ref().map(|v| v.len()).unwrap_or(0) != cells.len() {
@@ -375,76 +353,7 @@ impl DisplayManager {
         }
 
         buffer.extend_from_slice(b"\x1b[0m");
-        if self.capabilities.supports_sync_output {
-            buffer.extend_from_slice(b"\x1b[?2026l");
-        }
-        self.stdout.write_all(buffer)?;
-        self.stdout.flush()?;
-        Ok(())
-    }
-
-    fn render_kitty(&mut self, rgb_buffer: &[u8], viewport: RenderViewport) -> Result<()> {
-        self.render_buffer.clear();
-        let buffer = &mut self.render_buffer;
-
-        if self.clear_next_frame {
-            buffer.extend_from_slice(b"\x1b[2J");
-            self.clear_next_frame = false;
-        }
-
-        buffer.extend_from_slice(b"\x1b[");
-        Self::write_u16_fast(buffer, viewport.offset_y + 1);
-        buffer.push(b';');
-        Self::write_u16_fast(buffer, viewport.offset_x + 1);
-        buffer.push(b'H');
-
-        let payload = BASE64_STANDARD.encode(rgb_buffer);
-        let command = format!(
-            "\x1b_Gq=2,a=T,f=24,t=d,i=1,p=1,s={},v={},c={},r={},C=1;{}\x1b\\",
-            viewport.pixel_width,
-            viewport.pixel_height,
-            viewport.pixel_width,
-            viewport.content_rows(),
-            payload
-        );
-        buffer.extend_from_slice(command.as_bytes());
-        self.stdout.write_all(buffer)?;
-        self.stdout.flush()?;
-        Ok(())
-    }
-
-    fn render_iterm2(&mut self, rgb_buffer: &[u8], viewport: RenderViewport) -> Result<()> {
-        self.render_buffer.clear();
-        let buffer = &mut self.render_buffer;
-
-        if self.clear_next_frame {
-            buffer.extend_from_slice(b"\x1b[2J");
-            self.clear_next_frame = false;
-        }
-
-        let mut png = Vec::new();
-        let encoder = PngEncoder::new(&mut png);
-        encoder.write_image(
-            rgb_buffer,
-            viewport.pixel_width,
-            viewport.pixel_height,
-            ColorType::Rgb8,
-        )?;
-        let payload = BASE64_STANDARD.encode(png);
-
-        buffer.extend_from_slice(b"\x1b[");
-        Self::write_u16_fast(buffer, viewport.offset_y + 1);
-        buffer.push(b';');
-        Self::write_u16_fast(buffer, viewport.offset_x + 1);
-        buffer.push(b'H');
-
-        let command = format!(
-            "\x1b]1337;File=inline=1;width={};height={};preserveAspectRatio=0:{}\x07",
-            viewport.pixel_width,
-            viewport.content_rows(),
-            payload
-        );
-        buffer.extend_from_slice(command.as_bytes());
+        buffer.extend_from_slice(b"\x1b[?2026l");
         self.stdout.write_all(buffer)?;
         self.stdout.flush()?;
         Ok(())
@@ -453,9 +362,6 @@ impl DisplayManager {
 
 impl Drop for DisplayManager {
     fn drop(&mut self) {
-        if matches!(self.active_backend, ActiveRenderBackend::KittyGraphics) {
-            let _ = self.stdout.write_all(b"\x1b_Gq=2,a=d,d=A\x1b\\");
-        }
         let _ = self.stdout.execute(cursor::Show);
         let _ = self.stdout.execute(LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();

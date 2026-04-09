@@ -2,11 +2,9 @@ use crate::core::audio_manager::AudioManager;
 use crate::decoder::{RenderTarget, ScaleMode, VideoDecoder};
 use crate::renderer::cell::CellData;
 use crate::renderer::{
-    select_render_backend, ActiveRenderBackend, DisplayManager, DisplayMode, FrameProcessor,
-    RenderBackend, RenderViewport,
+    ActiveRenderBackend, DisplayManager, DisplayMode, FrameProcessor, RenderViewport,
 };
 use crate::sync::MasterClock;
-use crate::utils::platform::TerminalCapabilities;
 use anyhow::{anyhow, Result};
 use crossterm::event::{self, Event, KeyCode};
 use std::path::PathBuf;
@@ -43,12 +41,6 @@ impl FrameBudgetPolicy {
                 quality: RenderQuality::Balanced,
                 max_render_cells: u32::MAX,
                 drop_threshold: Duration::from_millis(90),
-            },
-            (DisplayMode::Rgb, ActiveRenderBackend::KittyGraphics)
-            | (DisplayMode::Rgb, ActiveRenderBackend::ITerm2Image) => Self {
-                quality: RenderQuality::High,
-                max_render_cells: 60_000,
-                drop_threshold: Duration::from_millis(75),
             },
             (DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb) => Self {
                 quality: RenderQuality::Performance,
@@ -95,7 +87,6 @@ pub struct PlaybackConfig {
     pub requested_fps: Option<u32>,
     pub display_mode: DisplayMode,
     pub viewport_mode: ViewportMode,
-    pub render_backend: RenderBackend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,12 +221,10 @@ fn make_even(value: u32) -> u32 {
 }
 
 pub fn play(config: PlaybackConfig) -> Result<()> {
-    let capabilities = TerminalCapabilities::detect();
-    let active_backend =
-        select_render_backend(config.display_mode, config.render_backend, &capabilities)?;
+    let active_backend = ActiveRenderBackend::for_mode(config.display_mode);
     let budget_policy = FrameBudgetPolicy::for_backend(config.display_mode, active_backend);
 
-    let mut display = DisplayManager::new(config.display_mode, active_backend, capabilities)?;
+    let mut display = DisplayManager::new(config.display_mode, active_backend)?;
     let (term_cols, term_rows) = DisplayManager::current_terminal_size_chars()?;
     let mut layout = ViewportLayout::calculate(
         term_cols,
@@ -625,7 +614,7 @@ mod tests {
             ViewportMode::Cinema16x9,
             None,
             None,
-            FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::KittyGraphics),
+            FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb),
         );
         let ratio = layout.pixel_width as f64 / layout.pixel_height as f64;
         assert!((ratio - (16.0 / 9.0)).abs() < 0.05);
@@ -639,7 +628,7 @@ mod tests {
             ViewportMode::Fullscreen,
             Some(120),
             Some(80),
-            FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::KittyGraphics),
+            FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb),
         );
         assert_eq!(layout.pixel_width, 120);
         assert_eq!(layout.pixel_height, 80);
