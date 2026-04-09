@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 
 use crate::core::extractor;
-use crate::renderer::DisplayMode;
+use crate::renderer::{DisplayMode, RenderBackend};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -70,6 +70,8 @@ enum Commands {
         fps: u32,
         #[arg(short = 'm', long, value_enum, default_value_t = DisplayMode::Rgb)]
         mode: DisplayMode,
+        #[arg(long, value_enum, default_value_t = RenderBackend::Auto)]
+        renderer: RenderBackend,
         #[arg(
             short = 'F',
             long,
@@ -127,6 +129,7 @@ fn main() -> Result<()> {
             height,
             fps,
             mode,
+            renderer,
             fill,
         } => {
             crate::core::player::play(crate::core::player::PlaybackConfig {
@@ -141,6 +144,7 @@ fn main() -> Result<()> {
                 } else {
                     crate::core::player::ViewportMode::Cinema16x9
                 },
+                render_backend: *renderer,
             })?;
         }
         Commands::Detect => {

@@ -1,14 +1,17 @@
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use crossterm::{
     cursor,
     style::Print,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
+use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 use std::io::{BufWriter, Stdout, Write};
 
+use super::backend::ActiveRenderBackend;
 use super::cell::CellData;
-use crate::shared::constants;
+use crate::utils::platform::TerminalCapabilities;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum DisplayMode {
@@ -16,17 +19,34 @@ pub enum DisplayMode {
     Rgb,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderViewport {
+    pub offset_x: u16,
+    pub offset_y: u16,
+    pub terminal_cols: u16,
+    pub terminal_rows: u16,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+}
+
+impl RenderViewport {
+    pub fn content_rows(self) -> u16 {
+        (self.pixel_height / 2) as u16
+    }
+}
+
 pub struct DisplayManager {
     stdout: BufWriter<Stdout>,
-    mode: DisplayMode,
+    active_backend: ActiveRenderBackend,
+    capabilities: TerminalCapabilities,
     last_cells: Option<Vec<CellData>>,
+    last_ascii: Option<Vec<char>>,
     render_buffer: Vec<u8>,
+    clear_next_frame: bool,
 }
 
 fn normalize_terminal_size(mut term_cols: u16, mut term_rows: u16) -> (u16, u16) {
-    if let (Ok(cw_str), Ok(ch_str)) =
-        (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT"))
-    {
+    if let (Ok(cw_str), Ok(ch_str)) = (std::env::var("CHAR_WIDTH"), std::env::var("CHAR_HEIGHT")) {
         if let (Ok(cw), Ok(ch)) = (cw_str.parse::<u16>(), ch_str.parse::<u16>()) {
             if term_cols > cw * 16 {
                 term_cols = (term_cols / cw).max(1);
@@ -40,30 +60,38 @@ fn normalize_terminal_size(mut term_cols: u16, mut term_rows: u16) -> (u16, u16)
     (term_cols.max(1), term_rows.max(1))
 }
 
+fn ascii_char_for_brightness(brightness: u32) -> char {
+    const ASCII_CHARS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+    let char_idx = ((brightness.min(255) * (ASCII_CHARS.len() as u32 - 1)) / 255) as usize;
+    ASCII_CHARS[char_idx]
+}
+
+#[cfg(test)]
 fn ascii_char_for(cell: &CellData) -> char {
     let top = (cell.fg.0 as u32 * 299 + cell.fg.1 as u32 * 587 + cell.fg.2 as u32 * 114) / 1000;
     let bottom =
         (cell.bg.0 as u32 * 299 + cell.bg.1 as u32 * 587 + cell.bg.2 as u32 * 114) / 1000;
-    let brightness = ((top + bottom) / 2).min(255);
-    const ASCII_CHARS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
-    let char_idx = ((brightness * (ASCII_CHARS.len() as u32 - 1)) / 255) as usize;
-    ASCII_CHARS[char_idx]
+    ascii_char_for_brightness((top + bottom) / 2)
 }
 
 impl DisplayManager {
-    pub fn new(mode: DisplayMode) -> Result<Self> {
-        // Use BufWriter
-        // Massive output buffer to minimize system call overhead (4MB for smooth 3D rendering)
+    pub fn new(
+        _mode: DisplayMode,
+        active_backend: ActiveRenderBackend,
+        capabilities: TerminalCapabilities,
+    ) -> Result<Self> {
         let stdout = BufWriter::with_capacity(4 * 1024 * 1024, std::io::stdout());
         let mut dm = Self {
             stdout,
-            mode,
+            active_backend,
+            capabilities,
             last_cells: None,
-            render_buffer: Vec::with_capacity(4 * 1024 * 1024), // Pre-allocate 4MB buffer
+            last_ascii: None,
+            render_buffer: Vec::with_capacity(4 * 1024 * 1024),
+            clear_next_frame: true,
         };
 
         dm.initialize_terminal()?;
-
         Ok(dm)
     }
 
@@ -71,25 +99,17 @@ impl DisplayManager {
         terminal::enable_raw_mode()?;
         self.stdout.execute(EnterAlternateScreen)?;
         self.stdout.execute(cursor::Hide)?;
-
-        // Disable line wrapping (DECRAWM) to prevent scrolling at edges
         self.stdout.execute(Print("\x1b[?7l"))?;
 
-        // === STRONGER V-SYNC ENFORCEMENT ===
-        // Enable synchronized updates mode (DECSM 2026)
-        // This ensures terminal waits for complete frame before rendering
-        self.stdout.execute(Print("\x1b[?2026h"))?;
+        if self.capabilities.supports_sync_output {
+            self.stdout.execute(Print("\x1b[?2026h"))?;
+        }
 
-        // Disable cursor blinking (reduces screen tearing)
         self.stdout.execute(Print("\x1b[?12l"))?;
-
-        // Request high refresh rate mode if supported
-        self.stdout.execute(Print("\x1b[?1049h"))?; // Alternative screen buffer
-
+        self.stdout.flush()?;
         Ok(())
     }
 
-    /// Return terminal size in character columns and rows, converting from pixels when needed.
     pub fn current_terminal_size_chars() -> Result<(u16, u16)> {
         let (term_cols, term_rows) = terminal::size()?;
         Ok(normalize_terminal_size(term_cols, term_rows))
@@ -97,9 +117,10 @@ impl DisplayManager {
 
     pub fn invalidate_cache(&mut self) {
         self.last_cells = None;
+        self.last_ascii = None;
+        self.clear_next_frame = true;
     }
 
-    // Helper for zero-allocation integer writing
     #[inline(always)]
     fn write_u8_fast(buffer: &mut Vec<u8>, mut n: u8) {
         if n == 0 {
@@ -121,7 +142,6 @@ impl DisplayManager {
         }
     }
 
-    // Helper for zero-allocation u16 writing
     #[inline(always)]
     fn write_u16_fast(buffer: &mut Vec<u8>, mut n: u16) {
         if n >= 10000 {
@@ -157,207 +177,308 @@ impl DisplayManager {
         }
     }
 
-    // Optimized Diffing Renderer with Zero-Allocation
-    pub fn render_diff(
+    pub fn render(
         &mut self,
-        cells: &[CellData],
-        width: usize,
-        offset_x: u16,
-        offset_y: u16,
-        terminal_cols: u16,
-        terminal_rows: u16,
+        rgb_buffer: &[u8],
+        rgb_cells: Option<&[CellData]>,
+        viewport: RenderViewport,
     ) -> Result<()> {
-        let start_render = std::time::Instant::now();
+        match self.active_backend {
+            ActiveRenderBackend::AnsiAscii => self.render_ascii(rgb_buffer, viewport),
+            ActiveRenderBackend::AnsiRgb => {
+                self.render_rgb_diff(rgb_cells.unwrap_or(&[]), viewport)
+            }
+            ActiveRenderBackend::KittyGraphics => self.render_kitty(rgb_buffer, viewport),
+            ActiveRenderBackend::ITerm2Image => self.render_iterm2(rgb_buffer, viewport),
+        }
+    }
 
-        // Reuse buffer
+    fn render_ascii(&mut self, rgb_buffer: &[u8], viewport: RenderViewport) -> Result<()> {
+        let width = viewport.pixel_width as usize;
+        let height = viewport.pixel_height as usize;
+        let cell_count = width * (height / 2);
+
+        if rgb_buffer.len() < width * height * 3 {
+            return Ok(());
+        }
+
         self.render_buffer.clear();
         let buffer = &mut self.render_buffer;
 
-        // VSync Begin (Directly into buffer)
-        buffer.extend_from_slice(b"\x1b[?2026h");
-
-        let mut force_redraw = false;
-        if self.last_cells.as_ref().map(|v| v.len()).unwrap_or(0) != cells.len() {
-            // Clear screen directly into buffer
-            buffer.extend_from_slice(b"\x1b[2J");
-            self.last_cells = Some(vec![CellData::default(); cells.len()]);
-            force_redraw = true;
+        if self.capabilities.supports_sync_output {
+            buffer.extend_from_slice(b"\x1b[?2026h");
         }
 
-        let last_cells = match &mut self.last_cells {
-            Some(v) => v,
-            None => {
-                return Ok(());
-            }
-        };
+        let last_ascii = self.last_ascii.get_or_insert_with(|| vec!['\0'; cell_count]);
+        let mut force_redraw = false;
+        if last_ascii.len() != cell_count {
+            *last_ascii = vec!['\0'; cell_count];
+            force_redraw = true;
+        }
+        if self.clear_next_frame {
+            buffer.extend_from_slice(b"\x1b[2J");
+            force_redraw = true;
+            self.clear_next_frame = false;
+        }
 
-        let mut last_fg: Option<(u8, u8, u8)> = None;
-        let mut last_bg: Option<(u8, u8, u8)> = None;
-
-        let (term_cols, term_rows) = normalize_terminal_size(terminal_cols, terminal_rows);
-        let content_width = width as u16;
-        let content_height = (cells.len() / width) as u16;
-
-        // Track virtual cursor position
+        let (term_cols, term_rows) =
+            normalize_terminal_size(viewport.terminal_cols, viewport.terminal_rows);
         let mut cursor_x: i32 = -1;
         let mut cursor_y: i32 = -1;
 
-        // Debug logging
-        if std::env::var("BAD_APPLE_DEBUG").is_ok() {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            let mut log_path = std::env::current_dir().unwrap_or_default();
-            log_path.push(constants::DEBUG_LOG_FILE);
-            if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
-                let _ = writeln!(
-                    file,
-                    "RENDER DEBUG: term={}x{} (after conversion) content={}x{} offset={}x{}",
-                    term_cols, term_rows, content_width, content_height, offset_x, offset_y
-                );
-            }
-        }
+        for cell_index in 0..cell_count {
+            let cx = cell_index % width;
+            let cy = cell_index / width;
+            let top_offset = (cy * 2 * width + cx) * 3;
+            let bottom_offset = ((cy * 2 + 1) * width + cx) * 3;
 
-        // OPTIMIZATION: Unified loop for both redraw and diff
-        for (i, cell) in cells.iter().enumerate() {
-            let old_cell = &last_cells[i];
-            let is_different = match self.mode {
-                DisplayMode::Rgb => {
-                    if force_redraw {
-                        true
-                    } else if cell.char != old_cell.char {
-                        true
-                    } else {
-                        cell.fg != old_cell.fg || cell.bg != old_cell.bg
-                    }
-                }
-                DisplayMode::Ascii => force_redraw || ascii_char_for(cell) != old_cell.char,
-            };
+            let top = (rgb_buffer[top_offset] as u32 * 299
+                + rgb_buffer[top_offset + 1] as u32 * 587
+                + rgb_buffer[top_offset + 2] as u32 * 114)
+                / 1000;
+            let bottom = (rgb_buffer[bottom_offset] as u32 * 299
+                + rgb_buffer[bottom_offset + 1] as u32 * 587
+                + rgb_buffer[bottom_offset + 2] as u32 * 114)
+                / 1000;
+            let ascii_char = ascii_char_for_brightness((top + bottom) / 2);
 
-            if is_different {
-                let x = (i % width) as u16;
-                let y = (i / width) as u16;
+            if force_redraw || last_ascii[cell_index] != ascii_char {
+                let target_x = viewport.offset_x + cx as u16;
+                let target_y = viewport.offset_y + cy as u16;
 
-                let target_x = x + offset_x;
-                let target_y = y + offset_y;
-
-                // BOUNDS CHECKING: Skip if outside terminal
                 if target_x >= term_cols || target_y >= term_rows {
                     cursor_x = -1;
                     continue;
                 }
 
-                // Zero-Allocation Cursor Move
                 if cursor_x != target_x as i32 || cursor_y != target_y as i32 {
                     buffer.extend_from_slice(b"\x1b[");
                     Self::write_u16_fast(buffer, target_y + 1);
                     buffer.push(b';');
                     Self::write_u16_fast(buffer, target_x + 1);
                     buffer.push(b'H');
-
                     cursor_x = target_x as i32;
                     cursor_y = target_y as i32;
                 }
 
-                // Render based on mode
-                match self.mode {
-                    DisplayMode::Rgb => {
-                        // Zero-Allocation Color Updates (TrueColor)
-                        // FG: \x1b[38;2;R;G;Bm
-                        if Some(cell.fg) != last_fg {
-                            buffer.extend_from_slice(b"\x1b[38;2;");
-                            Self::write_u8_fast(buffer, cell.fg.0);
-                            buffer.push(b';');
-                            Self::write_u8_fast(buffer, cell.fg.1);
-                            buffer.push(b';');
-                            Self::write_u8_fast(buffer, cell.fg.2);
-                            buffer.push(b'm');
-                            last_fg = Some(cell.fg);
-                        }
-                        // BG: \x1b[48;2;R;G;Bm
-                        if Some(cell.bg) != last_bg {
-                            buffer.extend_from_slice(b"\x1b[48;2;");
-                            Self::write_u8_fast(buffer, cell.bg.0);
-                            buffer.push(b';');
-                            Self::write_u8_fast(buffer, cell.bg.1);
-                            buffer.push(b';');
-                            Self::write_u8_fast(buffer, cell.bg.2);
-                            buffer.push(b'm');
-                            last_bg = Some(cell.bg);
-                        }
-                    }
-                    DisplayMode::Ascii => {
-                        let ascii_char = ascii_char_for(cell);
-
-                        // Write the ASCII character directly (no color codes)
-                        let mut b_dst = [0u8; 4];
-                        buffer.extend_from_slice(ascii_char.encode_utf8(&mut b_dst).as_bytes());
-
-                        last_cells[i] = CellData {
-                            char: ascii_char,
-                            fg: (0, 0, 0),
-                            bg: (0, 0, 0),
-                        };
-                        cursor_x += 1;
-
-                        // Skip the normal character write below
-                        continue;
-                    }
-                }
-
-                // Write character (RGB mode only, ASCII mode already wrote above)
-                let mut b_dst = [0u8; 4];
-                buffer.extend_from_slice(cell.char.encode_utf8(&mut b_dst).as_bytes());
-
-                last_cells[i] = *cell;
-
-                // Advance virtual cursor
+                let mut bytes = [0u8; 4];
+                buffer.extend_from_slice(ascii_char.encode_utf8(&mut bytes).as_bytes());
+                last_ascii[cell_index] = ascii_char;
                 cursor_x += 1;
             } else {
-                // If cell didn't change, invalidate cursor tracker
                 cursor_x = -1;
             }
         }
 
         buffer.extend_from_slice(b"\x1b[0m");
-
-        // VSync End (Directly into buffer)
-        buffer.extend_from_slice(b"\x1b[?2026l");
-
-        let diff_time = start_render.elapsed();
-
-        // I/O Measurement
-        let start_io = std::time::Instant::now();
+        if self.capabilities.supports_sync_output {
+            buffer.extend_from_slice(b"\x1b[?2026l");
+        }
         self.stdout.write_all(buffer)?;
         self.stdout.flush()?;
-        let io_time = start_io.elapsed();
+        Ok(())
+    }
 
-        let total_time = start_render.elapsed();
-        if total_time.as_millis() > 10 {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            let mut log_path = std::env::current_dir().unwrap_or_default();
-            log_path.push(constants::DEBUG_LOG_FILE);
+    fn render_rgb_diff(&mut self, cells: &[CellData], viewport: RenderViewport) -> Result<()> {
+        let width = viewport.pixel_width as usize;
 
-            if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
-                let _ = writeln!(
-                    file,
-                    "FAST RENDER: Total={}us | Diff={}us | IO={}us | Cells: {}",
-                    total_time.as_micros(),
-                    diff_time.as_micros(),
-                    io_time.as_micros(),
-                    cells.len()
-                );
-            }
+        self.render_buffer.clear();
+        let buffer = &mut self.render_buffer;
+
+        if self.capabilities.supports_sync_output {
+            buffer.extend_from_slice(b"\x1b[?2026h");
         }
 
+        let mut force_redraw = false;
+        if self.last_cells.as_ref().map(|v| v.len()).unwrap_or(0) != cells.len() {
+            self.last_cells = Some(vec![CellData::default(); cells.len()]);
+            force_redraw = true;
+        }
+        if self.clear_next_frame {
+            buffer.extend_from_slice(b"\x1b[2J");
+            force_redraw = true;
+            self.clear_next_frame = false;
+        }
+
+        let last_cells = match &mut self.last_cells {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let (term_cols, term_rows) =
+            normalize_terminal_size(viewport.terminal_cols, viewport.terminal_rows);
+        let mut last_fg: Option<(u8, u8, u8)> = None;
+        let mut last_bg: Option<(u8, u8, u8)> = None;
+        let mut cursor_x: i32 = -1;
+        let mut cursor_y: i32 = -1;
+
+        for (i, cell) in cells.iter().enumerate() {
+            let old_cell = &last_cells[i];
+            let is_different = if force_redraw {
+                true
+            } else if cell.char != old_cell.char {
+                true
+            } else {
+                cell.fg != old_cell.fg || cell.bg != old_cell.bg
+            };
+
+            if !is_different {
+                cursor_x = -1;
+                continue;
+            }
+
+            let x = (i % width) as u16;
+            let y = (i / width) as u16;
+            let target_x = x + viewport.offset_x;
+            let target_y = y as u16 + viewport.offset_y;
+
+            if target_x >= term_cols || target_y >= term_rows {
+                cursor_x = -1;
+                continue;
+            }
+
+            if cursor_x != target_x as i32 || cursor_y != target_y as i32 {
+                buffer.extend_from_slice(b"\x1b[");
+                Self::write_u16_fast(buffer, target_y + 1);
+                buffer.push(b';');
+                Self::write_u16_fast(buffer, target_x + 1);
+                buffer.push(b'H');
+                cursor_x = target_x as i32;
+                cursor_y = target_y as i32;
+            }
+
+            if Some(cell.fg) != last_fg {
+                buffer.extend_from_slice(b"\x1b[38;2;");
+                Self::write_u8_fast(buffer, cell.fg.0);
+                buffer.push(b';');
+                Self::write_u8_fast(buffer, cell.fg.1);
+                buffer.push(b';');
+                Self::write_u8_fast(buffer, cell.fg.2);
+                buffer.push(b'm');
+                last_fg = Some(cell.fg);
+            }
+            if Some(cell.bg) != last_bg {
+                buffer.extend_from_slice(b"\x1b[48;2;");
+                Self::write_u8_fast(buffer, cell.bg.0);
+                buffer.push(b';');
+                Self::write_u8_fast(buffer, cell.bg.1);
+                buffer.push(b';');
+                Self::write_u8_fast(buffer, cell.bg.2);
+                buffer.push(b'm');
+                last_bg = Some(cell.bg);
+            }
+
+            let mut bytes = [0u8; 4];
+            buffer.extend_from_slice(cell.char.encode_utf8(&mut bytes).as_bytes());
+            last_cells[i] = *cell;
+            cursor_x += 1;
+        }
+
+        buffer.extend_from_slice(b"\x1b[0m");
+        if self.capabilities.supports_sync_output {
+            buffer.extend_from_slice(b"\x1b[?2026l");
+        }
+        self.stdout.write_all(buffer)?;
+        self.stdout.flush()?;
+        Ok(())
+    }
+
+    fn render_kitty(&mut self, rgb_buffer: &[u8], viewport: RenderViewport) -> Result<()> {
+        self.render_buffer.clear();
+        let buffer = &mut self.render_buffer;
+
+        if self.clear_next_frame {
+            buffer.extend_from_slice(b"\x1b[2J");
+            self.clear_next_frame = false;
+        }
+
+        buffer.extend_from_slice(b"\x1b[");
+        Self::write_u16_fast(buffer, viewport.offset_y + 1);
+        buffer.push(b';');
+        Self::write_u16_fast(buffer, viewport.offset_x + 1);
+        buffer.push(b'H');
+
+        let payload = BASE64_STANDARD.encode(rgb_buffer);
+        let command = format!(
+            "\x1b_Gq=2,a=T,f=24,t=d,i=1,p=1,s={},v={},c={},r={},C=1;{}\x1b\\",
+            viewport.pixel_width,
+            viewport.pixel_height,
+            viewport.pixel_width,
+            viewport.content_rows(),
+            payload
+        );
+        buffer.extend_from_slice(command.as_bytes());
+        self.stdout.write_all(buffer)?;
+        self.stdout.flush()?;
+        Ok(())
+    }
+
+    fn render_iterm2(&mut self, rgb_buffer: &[u8], viewport: RenderViewport) -> Result<()> {
+        self.render_buffer.clear();
+        let buffer = &mut self.render_buffer;
+
+        if self.clear_next_frame {
+            buffer.extend_from_slice(b"\x1b[2J");
+            self.clear_next_frame = false;
+        }
+
+        let mut png = Vec::new();
+        let encoder = PngEncoder::new(&mut png);
+        encoder.write_image(
+            rgb_buffer,
+            viewport.pixel_width,
+            viewport.pixel_height,
+            ColorType::Rgb8,
+        )?;
+        let payload = BASE64_STANDARD.encode(png);
+
+        buffer.extend_from_slice(b"\x1b[");
+        Self::write_u16_fast(buffer, viewport.offset_y + 1);
+        buffer.push(b';');
+        Self::write_u16_fast(buffer, viewport.offset_x + 1);
+        buffer.push(b'H');
+
+        let command = format!(
+            "\x1b]1337;File=inline=1;width={};height={};preserveAspectRatio=0:{}\x07",
+            viewport.pixel_width,
+            viewport.content_rows(),
+            payload
+        );
+        buffer.extend_from_slice(command.as_bytes());
+        self.stdout.write_all(buffer)?;
+        self.stdout.flush()?;
         Ok(())
     }
 }
 
 impl Drop for DisplayManager {
     fn drop(&mut self) {
+        if matches!(self.active_backend, ActiveRenderBackend::KittyGraphics) {
+            let _ = self.stdout.write_all(b"\x1b_Gq=2,a=d,d=A\x1b\\");
+        }
         let _ = self.stdout.execute(cursor::Show);
         let _ = self.stdout.execute(LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_brightness_mapping_is_stable() {
+        assert_eq!(ascii_char_for_brightness(0), ' ');
+        assert_eq!(ascii_char_for_brightness(255), '@');
+    }
+
+    #[test]
+    fn ascii_cell_mapping_uses_average_brightness() {
+        let cell = CellData {
+            char: '▀',
+            fg: (255, 255, 255),
+            bg: (255, 255, 255),
+        };
+        assert_eq!(ascii_char_for(&cell), '@');
     }
 }

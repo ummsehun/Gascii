@@ -1,7 +1,111 @@
 use anyhow::Result;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::process::Command;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalFamily {
+    Ghostty,
+    Kitty,
+    WezTerm,
+    ITerm2,
+    Unknown,
+}
+
+impl TerminalFamily {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ghostty => "Ghostty",
+            Self::Kitty => "kitty",
+            Self::WezTerm => "WezTerm",
+            Self::ITerm2 => "iTerm2",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCapabilities {
+    pub terminal_family: TerminalFamily,
+    pub supports_ansi: bool,
+    pub supports_truecolor: bool,
+    pub supports_sync_output: bool,
+    pub supports_kitty_graphics: bool,
+    pub supports_iterm2_images: bool,
+}
+
+impl TerminalCapabilities {
+    pub fn detect() -> Self {
+        let term_program = env::var("TERM_PROGRAM").ok();
+        let term = env::var("TERM").ok();
+        let colorterm = env::var("COLORTERM").ok();
+        Self::from_env(term_program.as_deref(), term.as_deref(), colorterm.as_deref())
+    }
+
+    pub fn for_family(terminal_family: TerminalFamily) -> Self {
+        match terminal_family {
+            TerminalFamily::Ghostty => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: true,
+                supports_kitty_graphics: true,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::Kitty => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: true,
+                supports_kitty_graphics: true,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::WezTerm => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: true,
+                supports_kitty_graphics: true,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::ITerm2 => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: true,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: true,
+            },
+            TerminalFamily::Unknown => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: false,
+                supports_sync_output: false,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: false,
+            },
+        }
+    }
+
+    pub fn from_env(
+        term_program: Option<&str>,
+        term: Option<&str>,
+        colorterm: Option<&str>,
+    ) -> Self {
+        let terminal_family = detect_terminal_family(term_program, term);
+        let mut capabilities = Self::for_family(terminal_family);
+
+        capabilities.supports_truecolor = capabilities.supports_truecolor
+            || colorterm
+                .map(|value| {
+                    let lower = value.to_ascii_lowercase();
+                    lower.contains("truecolor") || lower.contains("24bit")
+                })
+                .unwrap_or(false);
+
+        capabilities
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlatformInfo {
@@ -9,6 +113,7 @@ pub struct PlatformInfo {
     pub os_version: String,
     pub arch: String,
     pub terminal: String,
+    pub terminal_family: TerminalFamily,
     pub shell: String,
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -21,8 +126,9 @@ pub struct PlatformInfo {
     pub char_aspect_ratio: f32,
     pub supports_ansi: bool,
     pub supports_truecolor: bool,
-    pub supports_kitty: bool,
-    pub supports_sixel: bool,
+    pub supports_sync_output: bool,
+    pub supports_kitty_graphics: bool,
+    pub supports_iterm2_images: bool,
     pub cpu_cores: usize,
     pub memory_mb: u64,
 }
@@ -30,22 +136,21 @@ pub struct PlatformInfo {
 impl PlatformInfo {
     pub fn detect() -> Result<Self> {
         let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
-        
-        // Detect actual screen resolution
+        let capabilities = TerminalCapabilities::detect();
         let (screen_w, screen_h) = Self::detect_screen_resolution();
-        
-        // Use simple defaults for character size (most terminals use roughly 1:2 ratio)
+
         let char_w = 10;
         let char_h = 20;
         let pixel_width = width as u32 * char_w;
         let pixel_height = height as u32 * char_h;
         let aspect = char_w as f32 / char_h as f32;
-        
+
         Ok(Self {
             os_name: std::env::consts::OS.to_string(),
             os_version: Self::detect_os_version(),
             arch: std::env::consts::ARCH.to_string(),
             terminal: Self::detect_terminal(),
+            terminal_family: capabilities.terminal_family,
             shell: Self::detect_shell(),
             terminal_width: width,
             terminal_height: height,
@@ -56,113 +161,45 @@ impl PlatformInfo {
             char_width: char_w,
             char_height: char_h,
             char_aspect_ratio: aspect,
-            supports_ansi: true, // Most modern terminals support ANSI
-            supports_truecolor: Self::detect_truecolor(),
-            supports_kitty: Self::detect_kitty(),
-            supports_sixel: Self::detect_sixel(),
+            supports_ansi: capabilities.supports_ansi,
+            supports_truecolor: capabilities.supports_truecolor,
+            supports_sync_output: capabilities.supports_sync_output,
+            supports_kitty_graphics: capabilities.supports_kitty_graphics,
+            supports_iterm2_images: capabilities.supports_iterm2_images,
             cpu_cores: num_cpus::get(),
             memory_mb: Self::detect_memory(),
         })
     }
 
     fn detect_screen_resolution() -> (u32, u32) {
-        // macOS: use system_profiler
         if cfg!(target_os = "macos") {
             if let Ok(output) = Command::new("system_profiler")
-                .args(&["SPDisplaysDataType"])
+                .args(["SPDisplaysDataType"])
                 .output()
             {
                 let output_str = String::from_utf8_lossy(&output.stdout);
-                
-                // Look for "Resolution:" line
                 for line in output_str.lines() {
-                    if line.contains("Resolution:") {
-                        eprintln!("DEBUG: Found resolution line: '{}'", line);
-                        
-                        // Extract everything after "Resolution:"
-                        if let Some(after_colon) = line.split("Resolution:").nth(1) {
-                            let resolution_str = after_colon.trim();
-                            eprintln!("DEBUG: Resolution str: '{}'", resolution_str);
-                            
-                            // Split by 'x' -> ["2880 ", " 1864 Retina"]
-                            let parts: Vec<&str> = resolution_str.split('x').map(|s| s.trim()).collect();
-                            eprintln!("DEBUG: Parts: {:?}", parts);
-                            
-                            if parts.len() >= 2 {
-                                let width_str = parts[0];
-                                // Take only the number part from "1864 Retina" -> "1864"
-                                let height_str = parts[1].split_whitespace().next().unwrap_or("");
-                                
-                                eprintln!("DEBUG: Parsing - Width: '{}', Height: '{}'", width_str, height_str);
-                                
-                                if let (Ok(w), Ok(h)) = (width_str.parse::<u32>(), height_str.parse::<u32>()) {
-                                    eprintln!("DEBUG: Successfully parsed: {}x{}", w, h);
-                                    return (w, h);
-                                } else {
-                                    eprintln!("DEBUG: Parse failed");
-                                }
+                    if let Some(after_colon) = line.split("Resolution:").nth(1) {
+                        let parts: Vec<&str> =
+                            after_colon.trim().split('x').map(str::trim).collect();
+                        if parts.len() >= 2 {
+                            let width_str = parts[0];
+                            let height_str = parts[1].split_whitespace().next().unwrap_or("");
+                            if let (Ok(w), Ok(h)) =
+                                (width_str.parse::<u32>(), height_str.parse::<u32>())
+                            {
+                                return (w, h);
                             }
                         }
                     }
                 }
-                eprintln!("DEBUG: No resolution found, using fallback");
-            } else {
-                eprintln!("DEBUG: system_profiler command failed");
             }
         }
-        
-        // Fallback: assume 1920x1080
+
         (1920, 1080)
     }
 
-    #[allow(dead_code)]
-    fn detect_pixel_size(cols: u16, rows: u16) -> (u32, u32, u32, u32) {
-        use std::io::{Write, Read};
-        use std::time::Duration;
-        
-        // Try CSI 14t (terminal window size in pixels)
-        // This might not work on all terminals
-        if let Ok(mut term) = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-        {
-            // Query terminal window size in pixels: CSI 14 t
-            let _ = term.write_all(b"\x1b[14t");
-            let _ = term.flush();
-            
-            // Give terminal time to respond
-            std::thread::sleep(Duration::from_millis(50));
-            
-            let mut response = vec![0u8; 64];
-            if let Ok(n) = term.read(&mut response) {
-                let resp_str = String::from_utf8_lossy(&response[..n]);
-                // Response format: ESC [ 4 ; height ; width t
-                if let Some(captures) = resp_str.strip_prefix("\x1b[4;") {
-                    let parts: Vec<&str> = captures.trim_end_matches('t').split(';').collect();
-                    if parts.len() == 2 {
-                        if let (Ok(h), Ok(w)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                            let char_w = w / cols as u32;
-                            let char_h = h / rows as u32;
-                            return (w, h, char_w.max(1), char_h.max(1));
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Fallback: assume standard terminal character ratio (1:2)
-        // Most terminal fonts have characters that are roughly half as wide as they are tall
-        let char_w = 10;
-        let char_h = 20;
-        let pixel_w = cols as u32 * char_w;
-        let pixel_h = rows as u32 * char_h;
-        
-        (pixel_w, pixel_h, char_w, char_h)
-    }
-
     fn detect_os_version() -> String {
-        // Simple detection using uname -r
         if let Ok(output) = Command::new("uname").arg("-r").output() {
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         } else {
@@ -188,21 +225,7 @@ impl PlatformInfo {
         }
     }
 
-    fn detect_truecolor() -> bool {
-        env::var("COLORTERM").map(|v| v.contains("truecolor") || v.contains("24bit")).unwrap_or(false)
-    }
-
-    fn detect_kitty() -> bool {
-        env::var("TERM").map(|v| v.contains("kitty")).unwrap_or(false)
-    }
-
-    fn detect_sixel() -> bool {
-        // Basic check for iTerm2 or known sixel terminals
-        env::var("TERM_PROGRAM").map(|v| v.contains("iTerm")).unwrap_or(false)
-    }
-
     fn detect_memory() -> u64 {
-        // macOS specific
         if cfg!(target_os = "macos") {
             if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.memsize").output() {
                 let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -212,5 +235,67 @@ impl PlatformInfo {
             }
         }
         0
+    }
+}
+
+fn detect_terminal_family(term_program: Option<&str>, term: Option<&str>) -> TerminalFamily {
+    let term_program = term_program
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let term = term.unwrap_or_default().to_ascii_lowercase();
+
+    if term_program.contains("ghostty") {
+        TerminalFamily::Ghostty
+    } else if term_program.contains("wezterm") || term.contains("wezterm") {
+        TerminalFamily::WezTerm
+    } else if term_program.contains("iterm") || term.contains("iterm") {
+        TerminalFamily::ITerm2
+    } else if term.contains("kitty") {
+        TerminalFamily::Kitty
+    } else {
+        TerminalFamily::Unknown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_ghostty() {
+        let caps = TerminalCapabilities::from_env(Some("ghostty"), Some("xterm-ghostty"), None);
+        assert_eq!(caps.terminal_family, TerminalFamily::Ghostty);
+        assert!(caps.supports_kitty_graphics);
+        assert!(caps.supports_sync_output);
+    }
+
+    #[test]
+    fn detects_kitty() {
+        let caps = TerminalCapabilities::from_env(None, Some("xterm-kitty"), Some("truecolor"));
+        assert_eq!(caps.terminal_family, TerminalFamily::Kitty);
+        assert!(caps.supports_kitty_graphics);
+        assert!(caps.supports_truecolor);
+    }
+
+    #[test]
+    fn detects_wezterm() {
+        let caps = TerminalCapabilities::from_env(Some("WezTerm"), Some("wezterm"), None);
+        assert_eq!(caps.terminal_family, TerminalFamily::WezTerm);
+        assert!(caps.supports_kitty_graphics);
+    }
+
+    #[test]
+    fn detects_iterm2() {
+        let caps = TerminalCapabilities::from_env(Some("iTerm.app"), Some("xterm-256color"), None);
+        assert_eq!(caps.terminal_family, TerminalFamily::ITerm2);
+        assert!(caps.supports_iterm2_images);
+    }
+
+    #[test]
+    fn unknown_terminal_is_conservative() {
+        let caps = TerminalCapabilities::from_env(None, Some("xterm-256color"), None);
+        assert_eq!(caps.terminal_family, TerminalFamily::Unknown);
+        assert!(!caps.supports_kitty_graphics);
+        assert!(!caps.supports_iterm2_images);
     }
 }
