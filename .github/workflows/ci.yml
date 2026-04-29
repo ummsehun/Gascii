@@ -2,106 +2,213 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release tag
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*.[0-9]*) ;;
+            *) echo "Release tags must look like v0.1 or v0.1.2"; exit 1 ;;
+          esac
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libopencv-dev clang libclang-dev build-essential lz4 libasound2-dev
       - name: Set LIBCLANG_PATH
-        run: echo "LIBCLANG_PATH=$(find /usr/lib -name 'libclang.so' -printf '%h' -quit)" >> $GITHUB_ENV
+        run: echo "LIBCLANG_PATH=$(find /usr/lib -name 'libclang.so' -printf '%h' -quit)" >> "$GITHUB_ENV"
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --release --verbose
       - name: Test
         run: cargo test --verbose
-      - name: Upload Artifact
+      - name: Package
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eux
+          version="${GITHUB_REF_NAME}"
+          package_dir="gascii-${version}-linux-x64"
+          mkdir -p "dist/${package_dir}/bin"
+          mkdir -p "dist/${package_dir}/lib"
+          cp target/release/Gascii "dist/${package_dir}/bin/gascii"
+          chmod +x "dist/${package_dir}/bin/gascii"
+          find /usr/lib /usr/local/lib -name 'libopencv*.so*' -type f -exec cp -L {} "dist/${package_dir}/lib/" \; 2>/dev/null || true
+          mv "dist/${package_dir}/bin/gascii" "dist/${package_dir}/bin/gascii-bin"
+          cat > "dist/${package_dir}/bin/gascii" <<'EOF'
+          #!/usr/bin/env bash
+          set -e
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          LD_LIBRARY_PATH="$DIR/../lib:${LD_LIBRARY_PATH:-}" exec "$DIR/gascii-bin" "$@"
+          EOF
+          chmod +x "dist/${package_dir}/bin/gascii"
+          cat > "dist/${package_dir}/manifest.json" <<EOF
+          {
+            "id": "gascii",
+            "name": "Gascii",
+            "version": "${version#v}",
+            "platform": "linux-x64",
+            "entry": "bin/gascii",
+            "runtime": {
+              "opencv": {
+                "bundled": true
+              }
+            }
+          }
+          EOF
+          tar -czf "dist/${package_dir}.tar.gz" -C dist "${package_dir}"
+      - name: Upload build artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: bad_apple-linux
-          path: target/release/bad_apple
+          name: gascii-linux-x64
+          path: dist/*.tar.gz
 
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM and Clang
-        run: choco install llvm
-      - name: Set LIBCLANG_PATH
-        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+      - name: Validate release tag
+        shell: powershell
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v[0-9]+\.[0-9]+(\.[0-9]+)?$') {
+            throw "Release tags must look like v0.1 or v0.1.2"
+          }
       - name: Install vcpkg and OpenCV
         shell: powershell
         run: |
           git clone https://github.com/microsoft/vcpkg.git $env:RUNNER_WORKSPACE\vcpkg
           & $env:RUNNER_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
-          & $env:RUNNER_WORKSPACE\vcpkg\vcpkg.exe install opencv4[contrib]:x64-windows
+          & $env:RUNNER_WORKSPACE\vcpkg\vcpkg.exe install llvm:x64-windows opencv4:x64-windows
           echo "VCPKG_ROOT=$env:RUNNER_WORKSPACE\vcpkg" >> $env:GITHUB_ENV
+          echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+          echo "VCPKGRS_TRIPLET=x64-windows" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=$env:RUNNER_WORKSPACE\vcpkg\installed\x64-windows\bin" >> $env:GITHUB_ENV
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
       - name: Build
+        env:
+          RUST_BACKTRACE: "1"
         run: cargo build --release --verbose
       - name: Test
         run: cargo test --verbose
-      - name: Upload Artifact
+      - name: Package
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: powershell
+        run: |
+          $version = "${env:GITHUB_REF_NAME}"
+          $packageDir = "gascii-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path "dist\$packageDir" | Out-Null
+          Copy-Item "target\release\Gascii.exe" "dist\$packageDir\gascii.exe"
+          Copy-Item "$env:RUNNER_WORKSPACE\vcpkg\installed\x64-windows\bin\*.dll" "dist\$packageDir\" -ErrorAction SilentlyContinue
+          $manifest = @"
+          {
+            "id": "gascii",
+            "name": "Gascii",
+            "version": "$($version.TrimStart('v'))",
+            "platform": "windows-x64",
+            "entry": "gascii.exe",
+            "runtime": {
+              "opencv": {
+                "bundled": true
+              }
+            }
+          }
+          "@
+          Set-Content -Path "dist\$packageDir\manifest.json" -Value $manifest
+          Compress-Archive -Path "dist\$packageDir" -DestinationPath "dist\$packageDir.zip" -Force
+      - name: Upload build artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: bad_apple-windows
-          path: target/release/bad_apple.exe
+          name: gascii-windows-x64
+          path: dist/*.zip
 
-  build-macos:
-    runs-on: macos-latest
+  build-macos-arm64:
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release tag
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*.[0-9]*) ;;
+            *) echo "Release tags must look like v0.1 or v0.1.2"; exit 1 ;;
+          esac
       - name: Install Homebrew deps
         run: |
           brew update
           brew install opencv lz4 pkg-config
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --release --verbose
       - name: Test
         run: cargo test --verbose
-      - name: Upload Artifact
+      - name: Package
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eux
+          version="${GITHUB_REF_NAME}"
+          package_dir="gascii-${version}-darwin-arm64"
+          mkdir -p "dist/${package_dir}/bin"
+          mkdir -p "dist/${package_dir}/lib"
+          cp target/release/Gascii "dist/${package_dir}/bin/gascii"
+          chmod +x "dist/${package_dir}/bin/gascii"
+          opencv_prefix="$(brew --prefix opencv)"
+          find "$opencv_prefix/lib" -name 'libopencv*.dylib' -type f -exec cp -L {} "dist/${package_dir}/lib/" \;
+          for lib in dist/${package_dir}/lib/*.dylib; do
+            [ -e "$lib" ] || continue
+            chmod +w "$lib"
+            install_name_tool -id "@rpath/$(basename "$lib")" "$lib" || true
+          done
+          for lib in dist/${package_dir}/lib/*.dylib; do
+            [ -e "$lib" ] || continue
+            base="$(basename "$lib")"
+            install_name_tool -change "$lib" "@rpath/$base" "dist/${package_dir}/bin/gascii" || true
+          done
+          install_name_tool -add_rpath "@loader_path/../lib" "dist/${package_dir}/bin/gascii" || true
+          cat > "dist/${package_dir}/manifest.json" <<EOF
+          {
+            "id": "gascii",
+            "name": "Gascii",
+            "version": "${version#v}",
+            "platform": "darwin-arm64",
+            "entry": "bin/gascii",
+            "runtime": {
+              "opencv": {
+                "bundled": true
+              }
+            }
+          }
+          EOF
+          tar -czf "dist/${package_dir}.tar.gz" -C dist "${package_dir}"
+      - name: Upload build artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: bad_apple-macos
-          path: target/release/bad_apple
+          name: gascii-darwin-arm64
+          path: dist/*.tar.gz
 
   release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-windows, build-macos-arm64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
-      - name: Release
-        uses: softprops/action-gh-release@v1
+          merge-multiple: true
+      - name: List release files
+        run: ls -la artifacts
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/bad_apple-linux/bad_apple
-            artifacts/bad_apple-windows/bad_apple.exe
-            artifacts/bad_apple-macos/bad_apple
+          files: artifacts/*
