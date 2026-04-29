@@ -20,9 +20,9 @@ pub enum ViewportMode {
     Cinema16x9,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum RenderQuality {
-    High,
+    Full,
     Balanced,
     Performance,
 }
@@ -35,29 +35,46 @@ pub struct FrameBudgetPolicy {
 }
 
 impl FrameBudgetPolicy {
-    pub fn for_backend(mode: DisplayMode, backend: ActiveRenderBackend) -> Self {
-        match (mode, backend) {
-            (DisplayMode::Ascii, _) => Self {
-                quality: RenderQuality::Balanced,
+    pub fn for_backend(
+        mode: DisplayMode,
+        backend: ActiveRenderBackend,
+        quality: RenderQuality,
+    ) -> Self {
+        match (quality, mode, backend) {
+            (RenderQuality::Full, _, _) => Self {
+                quality,
                 max_render_cells: u32::MAX,
                 drop_threshold: Duration::from_millis(90),
             },
-            (DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb) => Self {
-                quality: RenderQuality::Performance,
-                max_render_cells: 18_000,
-                drop_threshold: Duration::from_millis(60),
+            (RenderQuality::Balanced, DisplayMode::Ascii, _) => Self {
+                quality,
+                max_render_cells: u32::MAX,
+                drop_threshold: Duration::from_millis(90),
             },
-            (DisplayMode::Rgb, ActiveRenderBackend::AnsiAscii) => Self {
-                quality: RenderQuality::Balanced,
+            (RenderQuality::Balanced, DisplayMode::Rgb, _) => Self {
+                quality,
                 max_render_cells: 24_000,
                 drop_threshold: Duration::from_millis(75),
+            },
+            (RenderQuality::Performance, DisplayMode::Ascii, _) => Self {
+                quality,
+                max_render_cells: 24_000,
+                drop_threshold: Duration::from_millis(75),
+            },
+            (RenderQuality::Performance, DisplayMode::Rgb, _) => Self {
+                quality,
+                max_render_cells: 18_000,
+                drop_threshold: Duration::from_millis(60),
             },
         }
     }
 
     fn apply_to_dimensions(self, width: u32, height: u32, mode: ViewportMode) -> (u32, u32) {
         if self.max_render_cells == u32::MAX {
-            return (width.max(1), make_even(height.max(2)));
+            return match mode {
+                ViewportMode::Fullscreen => (width.max(1), make_even(height.max(2))),
+                ViewportMode::Cinema16x9 => fit_aspect_16_9(width, height),
+            };
         }
 
         let current_cells = width.saturating_mul((height / 2).max(1));
@@ -87,6 +104,7 @@ pub struct PlaybackConfig {
     pub requested_fps: Option<u32>,
     pub display_mode: DisplayMode,
     pub viewport_mode: ViewportMode,
+    pub quality: RenderQuality,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +125,7 @@ impl ViewportLayout {
         requested_width: Option<u32>,
         requested_height: Option<u32>,
         budget_policy: FrameBudgetPolicy,
+        source_aspect: f64,
     ) -> Self {
         let terminal_cols = terminal_cols.max(1);
         let terminal_rows = terminal_rows.max(1);
@@ -122,6 +141,7 @@ impl ViewportLayout {
                 let height = requested_height
                     .map(|value| value.min(max_pixel_height).max(2))
                     .unwrap_or(max_pixel_height);
+                let (width, height) = fit_aspect(width, height, source_aspect);
                 budget_policy.apply_to_dimensions(width, height, viewport_mode)
             }
             ViewportMode::Cinema16x9 => {
@@ -197,9 +217,17 @@ impl ViewportLayout {
 }
 
 fn fit_aspect_16_9(max_width: u32, max_height: u32) -> (u32, u32) {
+    fit_aspect(max_width, max_height, 16.0 / 9.0)
+}
+
+fn fit_aspect(max_width: u32, max_height: u32, aspect: f64) -> (u32, u32) {
     let max_width = max_width.max(1);
     let max_height = make_even(max_height.max(2));
-    let aspect = 16.0 / 9.0;
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        16.0 / 9.0
+    };
     let width_from_height = ((max_height as f64) * aspect).floor() as u32;
 
     if width_from_height <= max_width {
@@ -221,11 +249,20 @@ fn make_even(value: u32) -> u32 {
 }
 
 pub fn play(config: PlaybackConfig) -> Result<()> {
-    let active_backend = ActiveRenderBackend::for_mode(config.display_mode);
-    let budget_policy = FrameBudgetPolicy::for_backend(config.display_mode, active_backend);
-
-    let mut display = DisplayManager::new(config.display_mode, active_backend)?;
+    let requested_backend = ActiveRenderBackend::for_mode(config.display_mode);
+    let mut display = DisplayManager::new(config.display_mode, requested_backend)?;
+    let active_backend = display.active_backend();
+    let budget_policy =
+        FrameBudgetPolicy::for_backend(config.display_mode, active_backend, config.quality);
     let (term_cols, term_rows) = DisplayManager::current_terminal_size_chars()?;
+    let target = Arc::new(RwLock::new(RenderTarget::new(1, 2)));
+
+    let decoder = VideoDecoder::new(
+        config.video_path.to_string_lossy().as_ref(),
+        target.clone(),
+        ScaleMode::Fit,
+    )?;
+    let source_aspect = decoder.source_aspect_ratio();
     let mut layout = ViewportLayout::calculate(
         term_cols,
         term_rows,
@@ -233,22 +270,14 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         config.requested_width,
         config.requested_height,
         budget_policy,
+        source_aspect,
     );
-
-    let target = Arc::new(RwLock::new(RenderTarget::new(
-        layout.pixel_width,
-        layout.pixel_height,
-    )));
-    let scale_mode = match config.viewport_mode {
-        ViewportMode::Fullscreen => ScaleMode::CropToFill,
-        ViewportMode::Cinema16x9 => ScaleMode::Fit,
-    };
-
-    let decoder = VideoDecoder::new(
-        config.video_path.to_string_lossy().as_ref(),
-        target.clone(),
-        scale_mode,
-    )?;
+    {
+        let mut guard = target
+            .write()
+            .map_err(|_| anyhow!("render target lock poisoned"))?;
+        *guard = RenderTarget::new(layout.pixel_width, layout.pixel_height);
+    }
     let source_fps = decoder.get_fps();
     let playback_fps = config
         .requested_fps
@@ -268,7 +297,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
 
     let mut pending_future = frame_receiver
         .recv_timeout(Duration::from_secs(3))
-        .map_err(|_| anyhow!("Failed to receive first decoded frame"))?;
+        .map_err(|_| anyhow!("Failed to receive first decoded frame"))??;
 
     if pending_future.width != layout.pixel_width || pending_future.height != layout.pixel_height {
         pending_future =
@@ -280,7 +309,8 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
     } else {
         None
     };
-    let clock_start = if let (Some(audio), Some(audio_path)) = (&audio_manager, &config.audio_path) {
+    let clock_start = if let (Some(audio), Some(audio_path)) = (&audio_manager, &config.audio_path)
+    {
         audio.play(audio_path.to_string_lossy().as_ref())?
     } else {
         Instant::now()
@@ -303,7 +333,13 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
                     if let Some(audio) = &audio_manager {
                         let _ = audio.stop();
                     }
-                    return finalize(decoder_handle, frames_rendered, frames_dropped, started_at);
+                    return finalize(
+                        decoder_handle,
+                        frames_rendered,
+                        frames_dropped,
+                        started_at,
+                        true,
+                    );
                 }
                 Event::Resize(cols, rows) => {
                     last_terminal_size = (cols, rows);
@@ -316,6 +352,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
                         &mut pending_layout,
                         cols,
                         rows,
+                        source_aspect,
                     )?;
                 }
                 _ => {}
@@ -335,6 +372,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
                     &mut pending_layout,
                     current_size.0,
                     current_size.1,
+                    source_aspect,
                 )?;
             }
             last_resize_probe = Instant::now();
@@ -372,6 +410,15 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         loop {
             match frame_receiver.try_recv() {
                 Ok(frame) => {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            if let Some(audio) = &audio_manager {
+                                let _ = audio.stop();
+                            }
+                            return Err(error);
+                        }
+                    };
                     let Some(frame) = classify_frame(
                         frame,
                         &mut display,
@@ -380,7 +427,8 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
                         &mut pending_layout,
                         &mut processor,
                         &mut cell_buffer,
-                    )? else {
+                    )?
+                    else {
                         frames_dropped += 1;
                         continue;
                     };
@@ -459,7 +507,13 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         let _ = audio.stop();
     }
 
-    finalize(decoder_handle, frames_rendered, frames_dropped, started_at)
+    finalize(
+        decoder_handle,
+        frames_rendered,
+        frames_dropped,
+        started_at,
+        false,
+    )
 }
 
 fn is_too_late(
@@ -493,8 +547,10 @@ fn relayout(
         *processor = FrameProcessor::new(layout.pixel_width as usize, layout.pixel_height as usize);
     }
     if let Some(cells) = cell_buffer {
-        *cells =
-            vec![CellData::default(); layout.pixel_width as usize * (layout.pixel_height as usize / 2)];
+        *cells = vec![
+            CellData::default();
+            layout.pixel_width as usize * (layout.pixel_height as usize / 2)
+        ];
     }
     display.invalidate_cache();
     Ok(())
@@ -509,6 +565,7 @@ fn handle_resize(
     pending_layout: &mut Option<ViewportLayout>,
     cols: u16,
     rows: u16,
+    source_aspect: f64,
 ) -> Result<()> {
     let next_layout = ViewportLayout::calculate(
         cols,
@@ -517,6 +574,7 @@ fn handle_resize(
         config.requested_width,
         config.requested_height,
         budget_policy,
+        source_aspect,
     );
 
     let recentered = (*layout).recentered_for_terminal(cols, rows);
@@ -573,14 +631,14 @@ fn classify_frame(
 }
 
 fn wait_for_resized_frame(
-    receiver: &crossbeam_channel::Receiver<crate::decoder::FrameData>,
+    receiver: &crossbeam_channel::Receiver<Result<crate::decoder::FrameData>>,
     width: u32,
     height: u32,
 ) -> Result<crate::decoder::FrameData> {
     loop {
         let frame = receiver
             .recv_timeout(Duration::from_secs(3))
-            .map_err(|_| anyhow!("Failed to receive resized frame"))?;
+            .map_err(|_| anyhow!("Failed to receive resized frame"))??;
         if frame.width == width && frame.height == height {
             return Ok(frame);
         }
@@ -592,10 +650,22 @@ fn finalize(
     frames_rendered: u64,
     frames_dropped: u64,
     started_at: Instant,
+    user_requested_stop: bool,
 ) -> Result<()> {
-    let _ = decoder_handle.join();
+    let decoder_result = decoder_handle
+        .join()
+        .map_err(|_| anyhow!("Decoder thread panicked"))?;
+
+    if !user_requested_stop {
+        decoder_result?;
+    }
+
     let duration = started_at.elapsed();
-    println!("\n재생 완료");
+    if user_requested_stop {
+        println!("\n사용자 종료");
+    } else {
+        println!("\n재생 완료");
+    }
     println!("렌더링 프레임: {}", frames_rendered);
     println!("드롭 프레임: {}", frames_dropped);
     println!("재생 시간: {:.2}초", duration.as_secs_f64());
@@ -614,7 +684,12 @@ mod tests {
             ViewportMode::Cinema16x9,
             None,
             None,
-            FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb),
+            FrameBudgetPolicy::for_backend(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                RenderQuality::Full,
+            ),
+            16.0 / 9.0,
         );
         let ratio = layout.pixel_width as f64 / layout.pixel_height as f64;
         assert!((ratio - (16.0 / 9.0)).abs() < 0.05);
@@ -628,23 +703,90 @@ mod tests {
             ViewportMode::Fullscreen,
             Some(120),
             Some(80),
-            FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb),
+            FrameBudgetPolicy::for_backend(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                RenderQuality::Full,
+            ),
+            16.0 / 9.0,
         );
         assert_eq!(layout.pixel_width, 120);
-        assert_eq!(layout.pixel_height, 80);
+        assert_eq!(layout.pixel_height, 66);
     }
 
     #[test]
-    fn ansi_rgb_budget_scales_down_large_viewports() {
+    fn ansi_rgb_uses_full_source_aspect_viewport_resolution() {
         let layout = ViewportLayout::calculate(
             320,
             120,
             ViewportMode::Fullscreen,
             None,
             None,
-            FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb),
+            FrameBudgetPolicy::for_backend(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                RenderQuality::Full,
+            ),
+            16.0 / 9.0,
+        );
+        assert_eq!(layout.pixel_width, 320);
+        assert_eq!(layout.pixel_height, 180);
+    }
+
+    #[test]
+    fn fullscreen_layout_preserves_non_16_9_source_aspect() {
+        let layout = ViewportLayout::calculate(
+            320,
+            120,
+            ViewportMode::Fullscreen,
+            None,
+            None,
+            FrameBudgetPolicy::for_backend(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                RenderQuality::Full,
+            ),
+            4.0 / 3.0,
+        );
+        assert_eq!(layout.pixel_width, 320);
+        assert_eq!(layout.pixel_height, 240);
+    }
+
+    #[test]
+    fn balanced_quality_scales_down_large_rgb_viewports() {
+        let layout = ViewportLayout::calculate(
+            320,
+            120,
+            ViewportMode::Fullscreen,
+            None,
+            None,
+            FrameBudgetPolicy::for_backend(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                RenderQuality::Balanced,
+            ),
+            16.0 / 9.0,
         );
         let cells = layout.pixel_width * (layout.pixel_height / 2);
-        assert!(cells <= FrameBudgetPolicy::for_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb).max_render_cells);
+        assert!(cells <= 24_000);
+    }
+
+    #[test]
+    fn performance_quality_scales_down_large_rgb_viewports() {
+        let layout = ViewportLayout::calculate(
+            320,
+            120,
+            ViewportMode::Fullscreen,
+            None,
+            None,
+            FrameBudgetPolicy::for_backend(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                RenderQuality::Performance,
+            ),
+            16.0 / 9.0,
+        );
+        let cells = layout.pixel_width * (layout.pixel_height / 2);
+        assert!(cells <= 18_000);
     }
 }

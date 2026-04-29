@@ -9,6 +9,7 @@ use std::io::{BufWriter, Stdout, Write};
 
 use super::backend::ActiveRenderBackend;
 use super::cell::CellData;
+use crate::utils::platform::TerminalCapabilities;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum DisplayMode {
@@ -26,16 +27,44 @@ pub struct RenderViewport {
     pub pixel_height: u32,
 }
 
-impl RenderViewport {
-}
+impl RenderViewport {}
 
 pub struct DisplayManager {
     stdout: BufWriter<Stdout>,
     active_backend: ActiveRenderBackend,
+    supports_sync_output: bool,
     last_cells: Option<Vec<CellData>>,
     last_ascii: Option<Vec<char>>,
     render_buffer: Vec<u8>,
     clear_next_frame: bool,
+}
+
+fn resolve_backend(
+    mode: DisplayMode,
+    requested_backend: ActiveRenderBackend,
+    capabilities: TerminalCapabilities,
+) -> ActiveRenderBackend {
+    if mode == DisplayMode::Rgb && !capabilities.supports_truecolor {
+        ActiveRenderBackend::AnsiAscii
+    } else {
+        requested_backend
+    }
+}
+
+fn sync_begin_sequence(supports_sync_output: bool) -> &'static [u8] {
+    if supports_sync_output {
+        b"\x1b[?2026h"
+    } else {
+        b""
+    }
+}
+
+fn sync_end_sequence(supports_sync_output: bool) -> &'static [u8] {
+    if supports_sync_output {
+        b"\x1b[?2026l"
+    } else {
+        b""
+    }
 }
 
 fn normalize_terminal_size(mut term_cols: u16, mut term_rows: u16) -> (u16, u16) {
@@ -62,20 +91,33 @@ fn ascii_char_for_brightness(brightness: u32) -> char {
 #[cfg(test)]
 fn ascii_char_for(cell: &CellData) -> char {
     let top = (cell.fg.0 as u32 * 299 + cell.fg.1 as u32 * 587 + cell.fg.2 as u32 * 114) / 1000;
-    let bottom =
-        (cell.bg.0 as u32 * 299 + cell.bg.1 as u32 * 587 + cell.bg.2 as u32 * 114) / 1000;
+    let bottom = (cell.bg.0 as u32 * 299 + cell.bg.1 as u32 * 587 + cell.bg.2 as u32 * 114) / 1000;
     ascii_char_for_brightness((top + bottom) / 2)
 }
 
 impl DisplayManager {
-    pub fn new(
-        _mode: DisplayMode,
-        active_backend: ActiveRenderBackend,
-    ) -> Result<Self> {
+    pub fn new(mode: DisplayMode, requested_backend: ActiveRenderBackend) -> Result<Self> {
+        let capabilities = TerminalCapabilities::detect();
+        let active_backend = resolve_backend(mode, requested_backend, capabilities);
+        if mode == DisplayMode::Rgb && active_backend != requested_backend {
+            crate::utils::logger::info(&format!(
+                "Terminal {} does not report truecolor support; falling back to ASCII renderer",
+                capabilities.terminal_family.label()
+            ));
+        }
+
+        if !capabilities.supports_sync_output {
+            crate::utils::logger::info(&format!(
+                "Terminal {} does not report synchronized output support; disabling sync output sequences",
+                capabilities.terminal_family.label()
+            ));
+        }
+
         let stdout = BufWriter::with_capacity(4 * 1024 * 1024, std::io::stdout());
         let mut dm = Self {
             stdout,
             active_backend,
+            supports_sync_output: capabilities.supports_sync_output,
             last_cells: None,
             last_ascii: None,
             render_buffer: Vec::with_capacity(4 * 1024 * 1024),
@@ -86,12 +128,19 @@ impl DisplayManager {
         Ok(dm)
     }
 
+    pub fn active_backend(&self) -> ActiveRenderBackend {
+        self.active_backend
+    }
+
     fn initialize_terminal(&mut self) -> Result<()> {
         terminal::enable_raw_mode()?;
         self.stdout.execute(EnterAlternateScreen)?;
         self.stdout.execute(cursor::Hide)?;
         self.stdout.execute(Print("\x1b[?7l"))?;
-        self.stdout.execute(Print("\x1b[?2026h"))?;
+        self.stdout
+            .execute(Print(std::str::from_utf8(sync_begin_sequence(
+                self.supports_sync_output,
+            ))?))?;
 
         self.stdout.execute(Print("\x1b[?12l"))?;
         self.stdout.flush()?;
@@ -173,7 +222,9 @@ impl DisplayManager {
     ) -> Result<()> {
         match self.active_backend {
             ActiveRenderBackend::AnsiAscii => self.render_ascii(rgb_buffer, viewport),
-            ActiveRenderBackend::AnsiRgb => self.render_rgb_diff(rgb_cells.unwrap_or(&[]), viewport),
+            ActiveRenderBackend::AnsiRgb => {
+                self.render_rgb_diff(rgb_cells.unwrap_or(&[]), viewport)
+            }
         }
     }
 
@@ -189,9 +240,11 @@ impl DisplayManager {
         self.render_buffer.clear();
         let buffer = &mut self.render_buffer;
 
-        buffer.extend_from_slice(b"\x1b[?2026h");
+        buffer.extend_from_slice(sync_begin_sequence(self.supports_sync_output));
 
-        let last_ascii = self.last_ascii.get_or_insert_with(|| vec!['\0'; cell_count]);
+        let last_ascii = self
+            .last_ascii
+            .get_or_insert_with(|| vec!['\0'; cell_count]);
         let mut force_redraw = false;
         if last_ascii.len() != cell_count {
             *last_ascii = vec!['\0'; cell_count];
@@ -253,7 +306,7 @@ impl DisplayManager {
         }
 
         buffer.extend_from_slice(b"\x1b[0m");
-        buffer.extend_from_slice(b"\x1b[?2026l");
+        buffer.extend_from_slice(sync_end_sequence(self.supports_sync_output));
         self.stdout.write_all(buffer)?;
         self.stdout.flush()?;
         Ok(())
@@ -265,7 +318,7 @@ impl DisplayManager {
         self.render_buffer.clear();
         let buffer = &mut self.render_buffer;
 
-        buffer.extend_from_slice(b"\x1b[?2026h");
+        buffer.extend_from_slice(sync_begin_sequence(self.supports_sync_output));
 
         let mut force_redraw = false;
         if self.last_cells.as_ref().map(|v| v.len()).unwrap_or(0) != cells.len() {
@@ -353,7 +406,7 @@ impl DisplayManager {
         }
 
         buffer.extend_from_slice(b"\x1b[0m");
-        buffer.extend_from_slice(b"\x1b[?2026l");
+        buffer.extend_from_slice(sync_end_sequence(self.supports_sync_output));
         self.stdout.write_all(buffer)?;
         self.stdout.flush()?;
         Ok(())
@@ -371,6 +424,7 @@ impl Drop for DisplayManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::platform::{TerminalCapabilities, TerminalFamily};
 
     #[test]
     fn ascii_brightness_mapping_is_stable() {
@@ -386,5 +440,45 @@ mod tests {
             bg: (255, 255, 255),
         };
         assert_eq!(ascii_char_for(&cell), '@');
+    }
+
+    #[test]
+    fn truecolor_terminal_keeps_rgb_backend() {
+        let capabilities = TerminalCapabilities {
+            terminal_family: TerminalFamily::Kitty,
+            supports_ansi: true,
+            supports_truecolor: true,
+            supports_sync_output: true,
+            supports_kitty_graphics: true,
+            supports_iterm2_images: false,
+        };
+        assert_eq!(
+            resolve_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb, capabilities),
+            ActiveRenderBackend::AnsiRgb
+        );
+    }
+
+    #[test]
+    fn missing_truecolor_falls_back_to_ascii_backend() {
+        let capabilities = TerminalCapabilities {
+            terminal_family: TerminalFamily::Unknown,
+            supports_ansi: true,
+            supports_truecolor: false,
+            supports_sync_output: false,
+            supports_kitty_graphics: false,
+            supports_iterm2_images: false,
+        };
+        assert_eq!(
+            resolve_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb, capabilities),
+            ActiveRenderBackend::AnsiAscii
+        );
+    }
+
+    #[test]
+    fn sync_output_sequences_are_omitted_when_unsupported() {
+        assert_eq!(sync_begin_sequence(false), b"");
+        assert_eq!(sync_end_sequence(false), b"");
+        assert_eq!(sync_begin_sequence(true), b"\x1b[?2026h");
+        assert_eq!(sync_end_sequence(true), b"\x1b[?2026l");
     }
 }

@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 
 use crate::core::extractor;
+use crate::core::player::RenderQuality;
 use crate::renderer::DisplayMode;
 
 #[derive(Parser)]
@@ -55,26 +56,32 @@ enum Commands {
         #[arg(
             short = 'w',
             long,
-            default_value_t = 265,
-            help = "Requested width in pixels for video scaling (applies to the decoder and processor)"
+            help = "Optional maximum width in pixels for video scaling. Defaults to the current terminal width"
         )]
-        width: u32,
+        width: Option<u32>,
         #[arg(
             short = 'H',
             long,
-            default_value_t = 65,
-            help = "Requested height in pixels for video scaling (applies to the decoder and processor)"
+            help = "Optional maximum height in pixels for video scaling. Defaults to twice the current terminal row count"
         )]
-        height: u32,
+        height: Option<u32>,
         #[arg(short = 'p', long, default_value_t = 0)]
         fps: u32,
         #[arg(short = 'm', long, value_enum, default_value_t = DisplayMode::Rgb)]
         mode: DisplayMode,
         #[arg(
+            short = 'q',
+            long,
+            value_enum,
+            default_value_t = RenderQuality::Full,
+            help = "Render quality. 'full' uses the current terminal resolution without a render-cell cap"
+        )]
+        quality: RenderQuality,
+        #[arg(
             short = 'F',
             long,
             default_value_t = false,
-            help = "If true, Fill mode: crop to fill 16:9 box (center crop)"
+            help = "Use fullscreen viewport: preserve source aspect ratio and fit the largest possible image into the terminal"
         )]
         fill: bool,
     },
@@ -127,13 +134,14 @@ fn main() -> Result<()> {
             height,
             fps,
             mode,
+            quality,
             fill,
         } => {
             crate::core::player::play(crate::core::player::PlaybackConfig {
                 video_path: std::path::PathBuf::from(video),
                 audio_path: audio.as_ref().map(std::path::PathBuf::from),
-                requested_width: Some(*width),
-                requested_height: Some(*height),
+                requested_width: *width,
+                requested_height: *height,
                 requested_fps: if *fps > 0 { Some(*fps) } else { None },
                 display_mode: *mode,
                 viewport_mode: if *fill {
@@ -141,6 +149,7 @@ fn main() -> Result<()> {
                 } else {
                     crate::core::player::ViewportMode::Cinema16x9
                 },
+                quality: *quality,
             })?;
         }
         Commands::Detect => {
