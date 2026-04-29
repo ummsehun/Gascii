@@ -1,10 +1,10 @@
+use crate::core::audio_manager::AudioManager;
 use crate::core::playback_runtime::{
     classify_frame, finalize, handle_resize, is_too_late, wait_for_resized_frame, PlaybackStats,
     ShutdownReason,
 };
 use crate::core::render_budget::FrameBudgetPolicy;
 use crate::core::viewport::ViewportLayout;
-use crate::core::audio_manager::AudioManager;
 use crate::decoder::{RenderTarget, ScaleMode, VideoDecoder};
 use crate::renderer::cell::CellData;
 use crate::renderer::{
@@ -21,6 +21,8 @@ pub use crate::core::render_budget::RenderQuality;
 pub use crate::core::viewport::ViewportMode;
 
 const DEFAULT_QUEUE_CAPACITY: usize = 16;
+const MIN_QUEUE_CAPACITY: usize = 3;
+const DEFAULT_QUEUE_MEMORY_BUDGET: usize = 128 * 1024 * 1024;
 const FALLBACK_RESIZE_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
@@ -78,7 +80,12 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         .map(|value| value as f64)
         .unwrap_or(source_fps);
 
-    let (frame_sender, frame_receiver) = crossbeam_channel::bounded(DEFAULT_QUEUE_CAPACITY);
+    let queue_capacity = queue_capacity_for_dimensions(layout.pixel_width, layout.pixel_height);
+    crate::utils::logger::info(&format!(
+        "frame queue capacity={} frame={}x{}",
+        queue_capacity, layout.pixel_width, layout.pixel_height
+    ));
+    let (frame_sender, frame_receiver) = crossbeam_channel::bounded(queue_capacity);
     let decoder_handle = decoder.spawn_decoding_thread(frame_sender, playback_fps);
     let mut frame_receiver = Some(frame_receiver);
     let receiver = frame_receiver
@@ -329,5 +336,39 @@ fn audio_is_done(audio_manager: &Option<AudioManager>) -> bool {
     match audio_manager {
         Some(audio) => audio.is_finished().unwrap_or(true),
         None => true,
+    }
+}
+
+fn queue_capacity_for_dimensions(width: u32, height: u32) -> usize {
+    let frame_bytes = width as usize * height as usize * 3;
+    queue_capacity_for_frame_bytes(frame_bytes)
+}
+
+fn queue_capacity_for_frame_bytes(frame_bytes: usize) -> usize {
+    if frame_bytes == 0 {
+        return DEFAULT_QUEUE_CAPACITY;
+    }
+
+    let budgeted = DEFAULT_QUEUE_MEMORY_BUDGET / frame_bytes;
+    budgeted.clamp(MIN_QUEUE_CAPACITY, DEFAULT_QUEUE_CAPACITY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_capacity_keeps_default_for_small_frames() {
+        assert_eq!(
+            queue_capacity_for_dimensions(320, 180),
+            DEFAULT_QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn queue_capacity_is_memory_bounded_for_large_frames() {
+        let capacity = queue_capacity_for_dimensions(3840, 2160);
+        assert!(capacity < DEFAULT_QUEUE_CAPACITY);
+        assert!(capacity >= MIN_QUEUE_CAPACITY);
     }
 }

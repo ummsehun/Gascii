@@ -4,7 +4,8 @@ use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
 use fast_image_resize as fr;
 use fr::images::{Image, ImageRef};
-use opencv::{core, imgproc, prelude::*, videoio};
+use fr::{FilterType, ResizeAlg, ResizeOptions};
+use opencv::{core, prelude::*, videoio};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 const SEND_TIMEOUT: Duration = Duration::from_millis(100);
 const SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(10);
 const SLOW_FRAME_LOG_INTERVAL: Duration = Duration::from_secs(1);
+const DECODER_LEAD_TIME: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderTarget {
@@ -44,11 +46,12 @@ pub struct VideoDecoder {
     scale_mode: ScaleMode,
     target: Arc<RwLock<RenderTarget>>,
     frame: Mat,
-    rgb_frame: Mat,
     resizer: fr::Resizer,
+    resize_options: ResizeOptions,
     resized_image: Option<Image<'static>>,
     debug_log_path: PathBuf,
     slow_frame_stats: SlowFrameStats,
+    memory_profile_enabled: bool,
 }
 
 impl VideoDecoder {
@@ -69,11 +72,8 @@ impl VideoDecoder {
         writeln!(log_file, "=== OpenCV Video Decoder Initialization ===")?;
         writeln!(log_file, "Video: {}", path)?;
 
-        let mut capture = videoio::VideoCapture::from_file(path, videoio::CAP_ANY)?;
-        let _ = capture.set(
-            videoio::CAP_PROP_HW_ACCELERATION,
-            videoio::VIDEO_ACCELERATION_ANY as f64,
-        );
+        let mut capture = open_capture(path, &mut log_file)?;
+        let _ = capture.set(videoio::CAP_PROP_BUFFERSIZE, 1.0);
 
         if !capture.is_opened()? {
             let err_msg = format!("Failed to open video file: {}", path);
@@ -102,11 +102,13 @@ impl VideoDecoder {
             scale_mode,
             target,
             frame: Mat::default(),
-            rgb_frame: Mat::default(),
             resizer: fr::Resizer::new(),
+            resize_options: ResizeOptions::new()
+                .resize_alg(ResizeAlg::Convolution(FilterType::Hamming)),
             resized_image: None,
             debug_log_path: log_path,
             slow_frame_stats: SlowFrameStats::new(Instant::now()),
+            memory_profile_enabled: crate::utils::memory::profiling_enabled(),
         })
     }
 
@@ -125,10 +127,12 @@ impl VideoDecoder {
     ) -> std::thread::JoinHandle<Result<()>> {
         std::thread::spawn(move || {
             crate::utils::logger::debug("Decoder thread started");
+            let decode_started_at = Instant::now();
             let mut frame_counter: u64 = 0;
 
             let mut buffer = Vec::new();
             loop {
+                pace_decoding(decode_started_at, frame_counter, playback_fps);
                 match self.read_frame_into(&mut buffer) {
                     Ok(Some(target)) => {
                         let timestamp =
@@ -207,37 +211,28 @@ impl VideoDecoder {
         let new_w = ((orig_w as f64 * scale).round() as u32).max(1);
         let new_h = ((orig_h as f64 * scale).round() as u32).max(1);
 
-        #[cfg(target_os = "macos")]
-        imgproc::cvt_color(
-            &self.frame,
-            &mut self.rgb_frame,
-            imgproc::COLOR_BGR2RGB,
-            0,
-            core::AlgorithmHint::ALGO_HINT_DEFAULT,
-        )?;
-
-        #[cfg(not(target_os = "macos"))]
-        imgproc::cvt_color(&self.frame, &mut self.rgb_frame, imgproc::COLOR_BGR2RGB, 0)?;
-
-        if !self.rgb_frame.is_continuous() {
+        if !self.frame.is_continuous() {
             return Err(anyhow!("Frame is not continuous"));
         }
-        let rgb_bytes = self.rgb_frame.data_bytes()?;
-        let src_image = ImageRef::new(orig_w, orig_h, rgb_bytes, fr::PixelType::U8x3)?;
+        let bgr_bytes = self.frame.data_bytes()?;
+        let src_image = ImageRef::new(orig_w, orig_h, bgr_bytes, fr::PixelType::U8x3)?;
         let recreate_resized = self
             .resized_image
             .as_ref()
             .map(|image| image.width() != new_w || image.height() != new_h)
             .unwrap_or(true);
         if recreate_resized {
+            self.resizer.reset_internal_buffers();
             self.resized_image = Some(Image::new(new_w, new_h, fr::PixelType::U8x3));
         }
         let dst_image = self
             .resized_image
             .as_mut()
             .ok_or_else(|| anyhow!("resize buffer was not initialized"))?;
-        self.resizer.resize(&src_image, dst_image, None)?;
+        self.resizer
+            .resize(&src_image, dst_image, Some(&self.resize_options))?;
         let resize_time = start_resize.elapsed();
+        let resizer_internal_bytes = self.resizer.size_of_internal_buffers() as u64;
 
         let start_letterbox = std::time::Instant::now();
         let canvas_len = (target.pixel_width * target.pixel_height * 3) as usize;
@@ -258,8 +253,10 @@ impl VideoDecoder {
                 if src_offset + copy_len <= dst_image.buffer().len()
                     && dst_offset + copy_len <= buffer.len()
                 {
-                    buffer[dst_offset..dst_offset + copy_len]
-                        .copy_from_slice(&dst_image.buffer()[src_offset..src_offset + copy_len]);
+                    copy_bgr_to_rgb(
+                        &dst_image.buffer()[src_offset..src_offset + copy_len],
+                        &mut buffer[dst_offset..dst_offset + copy_len],
+                    );
                 }
             }
         } else {
@@ -275,8 +272,10 @@ impl VideoDecoder {
                 if src_offset + copy_len <= dst_image.buffer().len()
                     && dst_offset + copy_len <= buffer.len()
                 {
-                    buffer[dst_offset..dst_offset + copy_len]
-                        .copy_from_slice(&dst_image.buffer()[src_offset..src_offset + copy_len]);
+                    copy_bgr_to_rgb(
+                        &dst_image.buffer()[src_offset..src_offset + copy_len],
+                        &mut buffer[dst_offset..dst_offset + copy_len],
+                    );
                 }
             }
         }
@@ -284,13 +283,24 @@ impl VideoDecoder {
         let letterbox_time = start_letterbox.elapsed();
 
         let total_time = start_total.elapsed();
-        self.record_slow_frame(total_time, decode_time, resize_time, letterbox_time);
+        self.record_slow_frame(
+            target,
+            canvas_len as u64,
+            resizer_internal_bytes,
+            total_time,
+            decode_time,
+            resize_time,
+            letterbox_time,
+        );
 
         Ok(Some(target))
     }
 
     fn record_slow_frame(
         &mut self,
+        target: RenderTarget,
+        frame_buffer_bytes: u64,
+        resizer_internal_bytes: u64,
         total_time: Duration,
         decode_time: Duration,
         resize_time: Duration,
@@ -302,11 +312,68 @@ impl VideoDecoder {
                 .record(total_time, decode_time, resize_time, letterbox_time);
         }
 
-        if let Some(line) = self.slow_frame_stats.flush_if_due(now) {
+        if let Some(mut line) = self.slow_frame_stats.flush_if_due(now) {
+            if self.memory_profile_enabled {
+                let max_rss = crate::utils::memory::max_rss_bytes()
+                    .map(crate::utils::memory::format_bytes)
+                    .unwrap_or_else(|| "unknown".to_string());
+                line.push_str(&format!(
+                    " target={}x{} frame_buffer={} resizer_internal={} max_rss={}",
+                    target.pixel_width,
+                    target.pixel_height,
+                    crate::utils::memory::format_bytes(frame_buffer_bytes),
+                    crate::utils::memory::format_bytes(resizer_internal_bytes),
+                    max_rss
+                ));
+            }
             if let Ok(mut file) = OpenOptions::new().append(true).open(&self.debug_log_path) {
                 let _ = writeln!(file, "{}", line);
             }
         }
+    }
+}
+
+fn pace_decoding(started_at: Instant, frame_counter: u64, playback_fps: f64) {
+    if !playback_fps.is_finite() || playback_fps <= 0.0 {
+        return;
+    }
+
+    let frame_time = Duration::from_secs_f64(frame_counter as f64 / playback_fps);
+    let Some(target_time) = frame_time.checked_sub(DECODER_LEAD_TIME) else {
+        return;
+    };
+    let elapsed = started_at.elapsed();
+    if target_time > elapsed {
+        std::thread::sleep(target_time - elapsed);
+    }
+}
+
+fn open_capture(path: &str, log_file: &mut std::fs::File) -> Result<videoio::VideoCapture> {
+    let mut params = core::Vector::<i32>::new();
+    params.push(videoio::CAP_PROP_HW_ACCELERATION);
+    params.push(videoio::VIDEO_ACCELERATION_ANY);
+
+    match videoio::VideoCapture::from_file_with_params(path, videoio::CAP_ANY, &params) {
+        Ok(capture) => {
+            writeln!(log_file, "VideoCapture opened with HW acceleration params")?;
+            Ok(capture)
+        }
+        Err(error) => {
+            writeln!(
+                log_file,
+                "WARN: VideoCapture params failed ({}); falling back to default open",
+                error
+            )?;
+            videoio::VideoCapture::from_file(path, videoio::CAP_ANY).map_err(Into::into)
+        }
+    }
+}
+
+fn copy_bgr_to_rgb(src: &[u8], dst: &mut [u8]) {
+    for (src_pixel, dst_pixel) in src.chunks_exact(3).zip(dst.chunks_exact_mut(3)) {
+        dst_pixel[0] = src_pixel[2];
+        dst_pixel[1] = src_pixel[1];
+        dst_pixel[2] = src_pixel[0];
     }
 }
 
@@ -400,9 +467,7 @@ mod tests {
             .expect("summary should flush");
         assert!(line.contains("count=2"));
         assert!(line.contains("avg_total=16000us"));
-        assert!(stats
-            .flush_if_due(start + Duration::from_secs(2))
-            .is_none());
+        assert!(stats.flush_if_due(start + Duration::from_secs(2)).is_none());
     }
 
     #[test]
@@ -410,8 +475,6 @@ mod tests {
         let start = Instant::now();
         let mut stats = SlowFrameStats::new(start);
 
-        assert!(stats
-            .flush_if_due(start + Duration::from_secs(1))
-            .is_none());
+        assert!(stats.flush_if_due(start + Duration::from_secs(1)).is_none());
     }
 }
