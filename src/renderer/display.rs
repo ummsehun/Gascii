@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::{
     cursor,
     style::Print,
@@ -15,6 +15,13 @@ use crate::utils::platform::TerminalCapabilities;
 pub enum DisplayMode {
     Ascii,
     Rgb,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum TruecolorPolicy {
+    Auto,
+    Force,
+    Strict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,15 +46,24 @@ pub struct DisplayManager {
     clear_next_frame: bool,
 }
 
-fn resolve_backend(
+fn resolve_backend_with_policy(
     mode: DisplayMode,
     requested_backend: ActiveRenderBackend,
     capabilities: TerminalCapabilities,
-) -> ActiveRenderBackend {
-    if mode == DisplayMode::Rgb && !capabilities.supports_truecolor {
-        ActiveRenderBackend::AnsiAscii
-    } else {
-        requested_backend
+    truecolor_policy: TruecolorPolicy,
+) -> Result<ActiveRenderBackend> {
+    if mode != DisplayMode::Rgb {
+        return Ok(ActiveRenderBackend::AnsiAscii);
+    }
+
+    match truecolor_policy {
+        TruecolorPolicy::Force => Ok(requested_backend),
+        TruecolorPolicy::Auto if !capabilities.supports_truecolor => Ok(ActiveRenderBackend::AnsiAscii),
+        TruecolorPolicy::Strict if !capabilities.supports_truecolor => Err(anyhow!(
+            "Terminal {} does not report truecolor support. Use --truecolor-policy force to override or --mode ascii to run without RGB24.",
+            capabilities.terminal_family.label()
+        )),
+        _ => Ok(requested_backend),
     }
 }
 
@@ -96,12 +112,26 @@ fn ascii_char_for(cell: &CellData) -> char {
 }
 
 impl DisplayManager {
-    pub fn new(mode: DisplayMode, requested_backend: ActiveRenderBackend) -> Result<Self> {
+    pub fn new(
+        mode: DisplayMode,
+        requested_backend: ActiveRenderBackend,
+        truecolor_policy: TruecolorPolicy,
+    ) -> Result<Self> {
         let capabilities = TerminalCapabilities::detect();
-        let active_backend = resolve_backend(mode, requested_backend, capabilities);
+        let active_backend =
+            resolve_backend_with_policy(mode, requested_backend, capabilities, truecolor_policy)?;
         if mode == DisplayMode::Rgb && active_backend != requested_backend {
             crate::utils::logger::info(&format!(
                 "Terminal {} does not report truecolor support; falling back to ASCII renderer",
+                capabilities.terminal_family.label()
+            ));
+        }
+        if mode == DisplayMode::Rgb
+            && truecolor_policy == TruecolorPolicy::Force
+            && !capabilities.supports_truecolor
+        {
+            crate::utils::logger::info(&format!(
+                "Terminal {} does not report truecolor support; forcing RGB renderer by policy",
                 capabilities.terminal_family.label()
             ));
         }
@@ -453,7 +483,13 @@ mod tests {
             supports_iterm2_images: false,
         };
         assert_eq!(
-            resolve_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb, capabilities),
+            resolve_backend_with_policy(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                capabilities,
+                TruecolorPolicy::Auto
+            )
+            .unwrap(),
             ActiveRenderBackend::AnsiRgb
         );
     }
@@ -469,7 +505,76 @@ mod tests {
             supports_iterm2_images: false,
         };
         assert_eq!(
-            resolve_backend(DisplayMode::Rgb, ActiveRenderBackend::AnsiRgb, capabilities),
+            resolve_backend_with_policy(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                capabilities,
+                TruecolorPolicy::Auto
+            )
+            .unwrap(),
+            ActiveRenderBackend::AnsiAscii
+        );
+    }
+
+    #[test]
+    fn force_truecolor_keeps_rgb_backend_when_detection_fails() {
+        let capabilities = TerminalCapabilities {
+            terminal_family: TerminalFamily::Unknown,
+            supports_ansi: true,
+            supports_truecolor: false,
+            supports_sync_output: false,
+            supports_kitty_graphics: false,
+            supports_iterm2_images: false,
+        };
+        assert_eq!(
+            resolve_backend_with_policy(
+                DisplayMode::Rgb,
+                ActiveRenderBackend::AnsiRgb,
+                capabilities,
+                TruecolorPolicy::Force
+            )
+            .unwrap(),
+            ActiveRenderBackend::AnsiRgb
+        );
+    }
+
+    #[test]
+    fn strict_truecolor_returns_error_when_detection_fails() {
+        let capabilities = TerminalCapabilities {
+            terminal_family: TerminalFamily::Unknown,
+            supports_ansi: true,
+            supports_truecolor: false,
+            supports_sync_output: false,
+            supports_kitty_graphics: false,
+            supports_iterm2_images: false,
+        };
+        assert!(resolve_backend_with_policy(
+            DisplayMode::Rgb,
+            ActiveRenderBackend::AnsiRgb,
+            capabilities,
+            TruecolorPolicy::Strict
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ascii_mode_ignores_truecolor_policy() {
+        let capabilities = TerminalCapabilities {
+            terminal_family: TerminalFamily::Unknown,
+            supports_ansi: true,
+            supports_truecolor: false,
+            supports_sync_output: false,
+            supports_kitty_graphics: false,
+            supports_iterm2_images: false,
+        };
+        assert_eq!(
+            resolve_backend_with_policy(
+                DisplayMode::Ascii,
+                ActiveRenderBackend::AnsiAscii,
+                capabilities,
+                TruecolorPolicy::Strict
+            )
+            .unwrap(),
             ActiveRenderBackend::AnsiAscii
         );
     }

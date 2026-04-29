@@ -7,7 +7,9 @@ use crate::core::viewport::ViewportLayout;
 use crate::core::audio_manager::AudioManager;
 use crate::decoder::{RenderTarget, ScaleMode, VideoDecoder};
 use crate::renderer::cell::CellData;
-use crate::renderer::{ActiveRenderBackend, DisplayManager, DisplayMode, FrameProcessor};
+use crate::renderer::{
+    ActiveRenderBackend, DisplayManager, DisplayMode, FrameProcessor, TruecolorPolicy,
+};
 use crate::sync::MasterClock;
 use anyhow::{anyhow, Result};
 use crossterm::event::{self, Event, KeyCode};
@@ -31,11 +33,16 @@ pub struct PlaybackConfig {
     pub display_mode: DisplayMode,
     pub viewport_mode: ViewportMode,
     pub quality: RenderQuality,
+    pub truecolor_policy: TruecolorPolicy,
 }
 
 pub fn play(config: PlaybackConfig) -> Result<()> {
     let requested_backend = ActiveRenderBackend::for_mode(config.display_mode);
-    let mut display = DisplayManager::new(config.display_mode, requested_backend)?;
+    let mut display = DisplayManager::new(
+        config.display_mode,
+        requested_backend,
+        config.truecolor_policy,
+    )?;
     let active_backend = display.active_backend();
     let budget_policy =
         FrameBudgetPolicy::for_backend(config.display_mode, active_backend, config.quality);

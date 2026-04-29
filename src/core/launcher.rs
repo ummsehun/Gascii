@@ -52,6 +52,7 @@ pub fn run() -> Result<()> {
         display_mode: selection.display_mode,
         viewport_mode: selection.viewport_mode,
         quality: selection.quality,
+        truecolor_policy: crate::renderer::TruecolorPolicy::Auto,
     })?;
 
     Ok(())

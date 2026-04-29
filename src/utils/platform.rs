@@ -5,6 +5,12 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalFamily {
+    WindowsTerminal,
+    PowerShell,
+    Cmd,
+    ConEmu,
+    Mintty,
+    AppleTerminal,
     Ghostty,
     Kitty,
     WezTerm,
@@ -15,6 +21,12 @@ pub enum TerminalFamily {
 impl TerminalFamily {
     pub fn label(self) -> &'static str {
         match self {
+            Self::WindowsTerminal => "Windows Terminal",
+            Self::PowerShell => "PowerShell",
+            Self::Cmd => "CMD",
+            Self::ConEmu => "ConEmu",
+            Self::Mintty => "mintty",
+            Self::AppleTerminal => "Apple Terminal",
             Self::Ghostty => "Ghostty",
             Self::Kitty => "kitty",
             Self::WezTerm => "WezTerm",
@@ -34,16 +46,102 @@ pub struct TerminalCapabilities {
     pub supports_iterm2_images: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TerminalEnvironment<'a> {
+    pub os: &'a str,
+    pub term_program: Option<&'a str>,
+    pub term: Option<&'a str>,
+    pub colorterm: Option<&'a str>,
+    pub wt_session: Option<&'a str>,
+    pub conemu_ansi: Option<&'a str>,
+    pub ansicon: Option<&'a str>,
+    pub ps_module_path: Option<&'a str>,
+    pub comspec: Option<&'a str>,
+    pub ghostty_resources_dir: Option<&'a str>,
+    pub kitty_window_id: Option<&'a str>,
+    pub wezterm_executable: Option<&'a str>,
+}
+
 impl TerminalCapabilities {
     pub fn detect() -> Self {
         let term_program = env::var("TERM_PROGRAM").ok();
         let term = env::var("TERM").ok();
         let colorterm = env::var("COLORTERM").ok();
-        Self::from_env(term_program.as_deref(), term.as_deref(), colorterm.as_deref())
+        let wt_session = env::var("WT_SESSION").ok();
+        let conemu_ansi = env::var("ConEmuANSI").ok();
+        let ansicon = env::var("ANSICON").ok();
+        let ps_module_path = env::var("PSModulePath").ok();
+        let comspec = env::var("ComSpec").ok();
+        let ghostty_resources_dir = env::var("GHOSTTY_RESOURCES_DIR").ok();
+        let kitty_window_id = env::var("KITTY_WINDOW_ID").ok();
+        let wezterm_executable = env::var("WEZTERM_EXECUTABLE").ok();
+
+        Self::from_environment(TerminalEnvironment {
+            os: std::env::consts::OS,
+            term_program: term_program.as_deref(),
+            term: term.as_deref(),
+            colorterm: colorterm.as_deref(),
+            wt_session: wt_session.as_deref(),
+            conemu_ansi: conemu_ansi.as_deref(),
+            ansicon: ansicon.as_deref(),
+            ps_module_path: ps_module_path.as_deref(),
+            comspec: comspec.as_deref(),
+            ghostty_resources_dir: ghostty_resources_dir.as_deref(),
+            kitty_window_id: kitty_window_id.as_deref(),
+            wezterm_executable: wezterm_executable.as_deref(),
+        })
     }
 
     pub fn for_family(terminal_family: TerminalFamily) -> Self {
         match terminal_family {
+            TerminalFamily::WindowsTerminal => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: false,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::PowerShell => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: false,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::Cmd => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: false,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::ConEmu => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: false,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::Mintty => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: false,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: false,
+            },
+            TerminalFamily::AppleTerminal => Self {
+                terminal_family,
+                supports_ansi: true,
+                supports_truecolor: true,
+                supports_sync_output: false,
+                supports_kitty_graphics: false,
+                supports_iterm2_images: false,
+            },
             TerminalFamily::Ghostty => Self {
                 terminal_family,
                 supports_ansi: true,
@@ -92,11 +190,22 @@ impl TerminalCapabilities {
         term: Option<&str>,
         colorterm: Option<&str>,
     ) -> Self {
-        let terminal_family = detect_terminal_family(term_program, term);
+        Self::from_environment(TerminalEnvironment {
+            os: std::env::consts::OS,
+            term_program,
+            term,
+            colorterm,
+            ..TerminalEnvironment::default()
+        })
+    }
+
+    pub fn from_environment(environment: TerminalEnvironment<'_>) -> Self {
+        let terminal_family = detect_terminal_family(environment);
         let mut capabilities = Self::for_family(terminal_family);
 
         capabilities.supports_truecolor = capabilities.supports_truecolor
-            || colorterm
+            || environment
+                .colorterm
                 .map(|value| {
                     let lower = value.to_ascii_lowercase();
                     lower.contains("truecolor") || lower.contains("24bit")
@@ -208,6 +317,11 @@ impl PlatformInfo {
     }
 
     fn detect_terminal() -> String {
+        if let Ok(term) = env::var("WT_SESSION") {
+            if !term.is_empty() {
+                return "Windows Terminal".to_string();
+            }
+        }
         if let Ok(term) = env::var("TERM_PROGRAM") {
             return term;
         }
@@ -218,6 +332,9 @@ impl PlatformInfo {
     }
 
     fn detect_shell() -> String {
+        if let Ok(shell) = env::var("ComSpec") {
+            return shell.split('\\').last().unwrap_or("unknown").to_string();
+        }
         if let Ok(shell) = env::var("SHELL") {
             shell.split('/').last().unwrap_or("unknown").to_string()
         } else {
@@ -238,23 +355,50 @@ impl PlatformInfo {
     }
 }
 
-fn detect_terminal_family(term_program: Option<&str>, term: Option<&str>) -> TerminalFamily {
-    let term_program = term_program
+fn detect_terminal_family(environment: TerminalEnvironment<'_>) -> TerminalFamily {
+    let os = environment.os.to_ascii_lowercase();
+    let term_program = environment
+        .term_program
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let term = term.unwrap_or_default().to_ascii_lowercase();
+    let term = environment.term.unwrap_or_default().to_ascii_lowercase();
+    let comspec = environment
+        .comspec
+        .unwrap_or_default()
+        .to_ascii_lowercase();
 
-    if term_program.contains("ghostty") {
+    if has_value(environment.wt_session) {
+        TerminalFamily::WindowsTerminal
+    } else if has_value(environment.ghostty_resources_dir) || term_program.contains("ghostty") {
         TerminalFamily::Ghostty
-    } else if term_program.contains("wezterm") || term.contains("wezterm") {
+    } else if has_value(environment.wezterm_executable)
+        || term_program.contains("wezterm")
+        || term.contains("wezterm")
+    {
         TerminalFamily::WezTerm
     } else if term_program.contains("iterm") || term.contains("iterm") {
         TerminalFamily::ITerm2
-    } else if term.contains("kitty") {
+    } else if has_value(environment.kitty_window_id) || term.contains("kitty") {
         TerminalFamily::Kitty
+    } else if term_program.contains("apple_terminal") {
+        TerminalFamily::AppleTerminal
+    } else if term.contains("mintty") || term_program.contains("mintty") {
+        TerminalFamily::Mintty
+    } else if has_value(environment.conemu_ansi) {
+        TerminalFamily::ConEmu
+    } else if os == "windows" && has_value(environment.ansicon) {
+        TerminalFamily::Cmd
+    } else if os == "windows" && has_value(environment.ps_module_path) {
+        TerminalFamily::PowerShell
+    } else if os == "windows" && comspec.contains("cmd") {
+        TerminalFamily::Cmd
     } else {
         TerminalFamily::Unknown
     }
+}
+
+fn has_value(value: Option<&str>) -> bool {
+    value.map(|value| !value.is_empty()).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -263,7 +407,12 @@ mod tests {
 
     #[test]
     fn detects_ghostty() {
-        let caps = TerminalCapabilities::from_env(Some("ghostty"), Some("xterm-ghostty"), None);
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term_program: Some("ghostty"),
+            term: Some("xterm-ghostty"),
+            ..TerminalEnvironment::default()
+        });
         assert_eq!(caps.terminal_family, TerminalFamily::Ghostty);
         assert!(caps.supports_kitty_graphics);
         assert!(caps.supports_sync_output);
@@ -271,7 +420,12 @@ mod tests {
 
     #[test]
     fn detects_kitty() {
-        let caps = TerminalCapabilities::from_env(None, Some("xterm-kitty"), Some("truecolor"));
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term: Some("xterm-kitty"),
+            colorterm: Some("truecolor"),
+            ..TerminalEnvironment::default()
+        });
         assert_eq!(caps.terminal_family, TerminalFamily::Kitty);
         assert!(caps.supports_kitty_graphics);
         assert!(caps.supports_truecolor);
@@ -279,22 +433,86 @@ mod tests {
 
     #[test]
     fn detects_wezterm() {
-        let caps = TerminalCapabilities::from_env(Some("WezTerm"), Some("wezterm"), None);
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term_program: Some("WezTerm"),
+            term: Some("wezterm"),
+            ..TerminalEnvironment::default()
+        });
         assert_eq!(caps.terminal_family, TerminalFamily::WezTerm);
         assert!(caps.supports_kitty_graphics);
     }
 
     #[test]
     fn detects_iterm2() {
-        let caps = TerminalCapabilities::from_env(Some("iTerm.app"), Some("xterm-256color"), None);
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term_program: Some("iTerm.app"),
+            term: Some("xterm-256color"),
+            ..TerminalEnvironment::default()
+        });
         assert_eq!(caps.terminal_family, TerminalFamily::ITerm2);
         assert!(caps.supports_iterm2_images);
     }
 
     #[test]
-    fn unknown_terminal_is_conservative() {
-        let caps = TerminalCapabilities::from_env(None, Some("xterm-256color"), None);
+    fn detects_windows_terminal() {
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "windows",
+            wt_session: Some("session"),
+            ..TerminalEnvironment::default()
+        });
+        assert_eq!(caps.terminal_family, TerminalFamily::WindowsTerminal);
+        assert!(caps.supports_truecolor);
+        assert!(!caps.supports_sync_output);
+    }
+
+    #[test]
+    fn detects_apple_terminal() {
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term_program: Some("Apple_Terminal"),
+            term: Some("xterm-256color"),
+            ..TerminalEnvironment::default()
+        });
+        assert_eq!(caps.terminal_family, TerminalFamily::AppleTerminal);
+        assert!(caps.supports_truecolor);
+        assert!(!caps.supports_sync_output);
+    }
+
+    #[test]
+    fn detects_kitty_from_window_id() {
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term: Some("xterm-256color"),
+            kitty_window_id: Some("1"),
+            ..TerminalEnvironment::default()
+        });
+        assert_eq!(caps.terminal_family, TerminalFamily::Kitty);
+        assert!(caps.supports_truecolor);
+    }
+
+    #[test]
+    fn colorterm_truecolor_overrides_unknown_family() {
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term: Some("xterm-256color"),
+            colorterm: Some("24bit"),
+            ..TerminalEnvironment::default()
+        });
         assert_eq!(caps.terminal_family, TerminalFamily::Unknown);
+        assert!(caps.supports_truecolor);
+    }
+
+    #[test]
+    fn unknown_terminal_is_conservative() {
+        let caps = TerminalCapabilities::from_environment(TerminalEnvironment {
+            os: "macos",
+            term: Some("xterm-256color"),
+            ..TerminalEnvironment::default()
+        });
+        assert_eq!(caps.terminal_family, TerminalFamily::Unknown);
+        assert!(!caps.supports_truecolor);
         assert!(!caps.supports_kitty_graphics);
         assert!(!caps.supports_iterm2_images);
     }

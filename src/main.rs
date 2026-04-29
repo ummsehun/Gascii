@@ -12,7 +12,7 @@ use std::io::IsTerminal;
 
 use crate::core::extractor;
 use crate::core::player::RenderQuality;
-use crate::renderer::DisplayMode;
+use crate::renderer::{DisplayMode, TruecolorPolicy};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -78,6 +78,13 @@ enum Commands {
         )]
         quality: RenderQuality,
         #[arg(
+            long,
+            value_enum,
+            default_value_t = TruecolorPolicy::Auto,
+            help = "Truecolor handling: auto detects and falls back, force always uses RGB24, strict errors if unsupported"
+        )]
+        truecolor_policy: TruecolorPolicy,
+        #[arg(
             short = 'F',
             long,
             default_value_t = false,
@@ -135,6 +142,7 @@ fn main() -> Result<()> {
             fps,
             mode,
             quality,
+            truecolor_policy,
             fill,
         } => {
             crate::core::player::play(crate::core::player::PlaybackConfig {
@@ -150,6 +158,7 @@ fn main() -> Result<()> {
                     crate::core::player::ViewportMode::Cinema16x9
                 },
                 quality: *quality,
+                truecolor_policy: *truecolor_policy,
             })?;
         }
         Commands::Detect => {
