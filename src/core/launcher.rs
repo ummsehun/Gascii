@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::time::Duration;
 
-use crate::core::player::{PlaybackConfig, RenderQuality, ViewportMode};
+use crate::core::player::{PlaybackConfig, ViewportMode};
 use crate::shared::constants;
 
 pub fn run() -> Result<()> {
@@ -20,10 +20,11 @@ pub fn run() -> Result<()> {
     };
 
     crate::utils::logger::info(&format!(
-        "launch selection: video={} mode={} viewport={} audio={}",
+        "launch selection: video={} mode={} viewport={} quality={:?} audio={}",
         selection.video_path.display(),
         mode,
         viewport,
+        selection.quality,
         selection
             .audio_path
             .as_ref()
@@ -50,7 +51,7 @@ pub fn run() -> Result<()> {
         requested_fps: None,
         display_mode: selection.display_mode,
         viewport_mode: selection.viewport_mode,
-        quality: RenderQuality::Full,
+        quality: selection.quality,
     })?;
 
     Ok(())

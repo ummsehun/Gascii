@@ -20,6 +20,11 @@ pub const MENU_LOGO: &[&str] = &[
 
 pub const MENU_RENDER_MODE_LABELS: &[&str] =
     &["RGB TrueColor (최고 화질)", "ASCII 흑백 (텍스트 모드)"];
+pub const MENU_QUALITY_LABELS: &[&str] = &[
+    "Full (터미널 해상도 그대로)",
+    "Balanced (큰 화면 성능 보호)",
+    "Performance (FPS 우선)",
+];
 pub const MENU_SCREEN_MODE_LABELS: &[&str] = &["전체 화면 (꽉 차게)", "영화관 화면 (16:9)"];
 pub const MENU_NO_AUDIO_LABEL: &str = "오디오 없이 재생";
 

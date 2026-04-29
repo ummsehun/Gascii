@@ -7,7 +7,13 @@ use fr::images::{Image, ImageRef};
 use opencv::{core, imgproc, prelude::*, videoio};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+const SEND_TIMEOUT: Duration = Duration::from_millis(100);
+const SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(10);
+const SLOW_FRAME_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderTarget {
@@ -41,6 +47,8 @@ pub struct VideoDecoder {
     rgb_frame: Mat,
     resizer: fr::Resizer,
     resized_image: Option<Image<'static>>,
+    debug_log_path: PathBuf,
+    slow_frame_stats: SlowFrameStats,
 }
 
 impl VideoDecoder {
@@ -97,6 +105,8 @@ impl VideoDecoder {
             rgb_frame: Mat::default(),
             resizer: fr::Resizer::new(),
             resized_image: None,
+            debug_log_path: log_path,
+            slow_frame_stats: SlowFrameStats::new(Instant::now()),
         })
     }
 
@@ -117,8 +127,8 @@ impl VideoDecoder {
             crate::utils::logger::debug("Decoder thread started");
             let mut frame_counter: u64 = 0;
 
+            let mut buffer = Vec::new();
             loop {
-                let mut buffer = Vec::new();
                 match self.read_frame_into(&mut buffer) {
                     Ok(Some(target)) => {
                         let timestamp =
@@ -126,14 +136,26 @@ impl VideoDecoder {
                         frame_counter += 1;
 
                         let frame = FrameData::new(
-                            buffer,
+                            std::mem::take(&mut buffer),
                             target.pixel_width,
                             target.pixel_height,
                             timestamp,
                         );
-                        if sender.send(Ok(frame)).is_err() {
-                            crate::utils::logger::debug("Decoder sender error (receiver dropped)");
-                            break;
+                        match sender.send_timeout(Ok(frame), SEND_TIMEOUT) {
+                            Ok(()) => {}
+                            Err(crossbeam_channel::SendTimeoutError::Timeout(value)) => {
+                                buffer = match value {
+                                    Ok(frame) => frame.buffer,
+                                    Err(_) => Vec::new(),
+                                };
+                                continue;
+                            }
+                            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                                crate::utils::logger::debug(
+                                    "Decoder sender error (receiver dropped)",
+                                );
+                                break;
+                            }
                         }
                     }
                     Ok(None) => {
@@ -143,7 +165,7 @@ impl VideoDecoder {
                     Err(e) => {
                         crate::utils::logger::error(&format!("Decoding error: {}", e));
                         let message = e.to_string();
-                        let _ = sender.send(Err(anyhow!(message.clone())));
+                        let _ = sender.send_timeout(Err(anyhow!(message.clone())), SEND_TIMEOUT);
                         return Err(anyhow!(message));
                     }
                 }
@@ -262,22 +284,134 @@ impl VideoDecoder {
         let letterbox_time = start_letterbox.elapsed();
 
         let total_time = start_total.elapsed();
-        if total_time.as_millis() > 10 {
-            let mut log_path = std::env::current_dir().unwrap_or_default();
-            log_path.push(constants::DEBUG_LOG_FILE);
-
-            if let Ok(mut file) = OpenOptions::new().append(true).open(log_path) {
-                let _ = writeln!(
-                    file,
-                    "SIMD_FRAME: Total={}us | Decode={}us | Resize={}us | Letterbox={}us",
-                    total_time.as_micros(),
-                    decode_time.as_micros(),
-                    resize_time.as_micros(),
-                    letterbox_time.as_micros()
-                );
-            }
-        }
+        self.record_slow_frame(total_time, decode_time, resize_time, letterbox_time);
 
         Ok(Some(target))
+    }
+
+    fn record_slow_frame(
+        &mut self,
+        total_time: Duration,
+        decode_time: Duration,
+        resize_time: Duration,
+        letterbox_time: Duration,
+    ) {
+        let now = Instant::now();
+        if total_time > SLOW_FRAME_THRESHOLD {
+            self.slow_frame_stats
+                .record(total_time, decode_time, resize_time, letterbox_time);
+        }
+
+        if let Some(line) = self.slow_frame_stats.flush_if_due(now) {
+            if let Ok(mut file) = OpenOptions::new().append(true).open(&self.debug_log_path) {
+                let _ = writeln!(file, "{}", line);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SlowFrameStats {
+    window_start: Instant,
+    count: u64,
+    total_us: u128,
+    max_total_us: u128,
+    max_decode_us: u128,
+    max_resize_us: u128,
+    max_letterbox_us: u128,
+}
+
+impl SlowFrameStats {
+    fn new(window_start: Instant) -> Self {
+        Self {
+            window_start,
+            count: 0,
+            total_us: 0,
+            max_total_us: 0,
+            max_decode_us: 0,
+            max_resize_us: 0,
+            max_letterbox_us: 0,
+        }
+    }
+
+    fn record(
+        &mut self,
+        total_time: Duration,
+        decode_time: Duration,
+        resize_time: Duration,
+        letterbox_time: Duration,
+    ) {
+        self.count += 1;
+        self.total_us += total_time.as_micros();
+        self.max_total_us = self.max_total_us.max(total_time.as_micros());
+        self.max_decode_us = self.max_decode_us.max(decode_time.as_micros());
+        self.max_resize_us = self.max_resize_us.max(resize_time.as_micros());
+        self.max_letterbox_us = self.max_letterbox_us.max(letterbox_time.as_micros());
+    }
+
+    fn flush_if_due(&mut self, now: Instant) -> Option<String> {
+        if now.duration_since(self.window_start) < SLOW_FRAME_LOG_INTERVAL {
+            return None;
+        }
+
+        let line = (self.count > 0).then(|| {
+            format!(
+                "SIMD_FRAME_SUMMARY: count={} avg_total={}us max_total={}us max_decode={}us max_resize={}us max_letterbox={}us",
+                self.count,
+                self.total_us / self.count as u128,
+                self.max_total_us,
+                self.max_decode_us,
+                self.max_resize_us,
+                self.max_letterbox_us
+            )
+        });
+
+        *self = Self::new(now);
+        line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slow_frame_stats_flushes_one_summary_per_window() {
+        let start = Instant::now();
+        let mut stats = SlowFrameStats::new(start);
+        stats.record(
+            Duration::from_millis(12),
+            Duration::from_millis(3),
+            Duration::from_millis(5),
+            Duration::from_millis(4),
+        );
+        stats.record(
+            Duration::from_millis(20),
+            Duration::from_millis(4),
+            Duration::from_millis(10),
+            Duration::from_millis(6),
+        );
+
+        assert!(stats
+            .flush_if_due(start + Duration::from_millis(999))
+            .is_none());
+        let line = stats
+            .flush_if_due(start + Duration::from_secs(1))
+            .expect("summary should flush");
+        assert!(line.contains("count=2"));
+        assert!(line.contains("avg_total=16000us"));
+        assert!(stats
+            .flush_if_due(start + Duration::from_secs(2))
+            .is_none());
+    }
+
+    #[test]
+    fn slow_frame_stats_without_records_flushes_nothing() {
+        let start = Instant::now();
+        let mut stats = SlowFrameStats::new(start);
+
+        assert!(stats
+            .flush_if_due(start + Duration::from_secs(1))
+            .is_none());
     }
 }
