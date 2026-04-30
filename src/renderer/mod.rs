@@ -1,7 +1,7 @@
 pub mod backend;
+pub mod cell;
 pub mod display;
 pub mod processor;
-pub mod cell;
 
 pub use backend::ActiveRenderBackend;
 pub use display::DisplayManager;

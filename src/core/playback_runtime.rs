@@ -145,14 +145,33 @@ pub(crate) fn finalize(
     let duration = stats.started_at.elapsed();
     match reason {
         ShutdownReason::UserRequested => {
+            crate::utils::logger::info(&format!(
+                "playback stopped by user: rendered={} dropped={} duration={:.2}s",
+                stats.frames_rendered,
+                stats.frames_dropped,
+                duration.as_secs_f64()
+            ));
             println!("\n사용자 종료");
         }
         ShutdownReason::Completed => {
             decoder_result?;
+            crate::utils::logger::info(&format!(
+                "playback completed: rendered={} dropped={} duration={:.2}s",
+                stats.frames_rendered,
+                stats.frames_dropped,
+                duration.as_secs_f64()
+            ));
             println!("\n재생 완료");
         }
         ShutdownReason::DecoderError(error) => {
             let _ = decoder_result;
+            crate::utils::logger::error(&format!(
+                "playback stopped by decoder error: rendered={} dropped={} duration={:.2}s error={}",
+                stats.frames_rendered,
+                stats.frames_dropped,
+                duration.as_secs_f64(),
+                error
+            ));
             println!("\n디코더 오류로 종료");
             println!("렌더링 프레임: {}", stats.frames_rendered);
             println!("드롭 프레임: {}", stats.frames_dropped);
@@ -227,7 +246,11 @@ mod tests {
     fn decoder_error_reason_returns_error_after_join() {
         let handle = std::thread::spawn(|| Ok(()));
         let stats = PlaybackStats::new();
-        let result = finalize(handle, stats, ShutdownReason::DecoderError(anyhow!("decode failed")));
+        let result = finalize(
+            handle,
+            stats,
+            ShutdownReason::DecoderError(anyhow!("decode failed")),
+        );
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "decode failed");

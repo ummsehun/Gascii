@@ -60,13 +60,14 @@ impl VideoDecoder {
         target: Arc<RwLock<RenderTarget>>,
         scale_mode: ScaleMode,
     ) -> Result<Self> {
-        let mut log_path = std::env::current_dir()?;
+        let runtime = crate::utils::runtime::detect();
+        let _ = std::fs::create_dir_all(&runtime.log_dir);
+        let mut log_path = runtime.log_dir;
         log_path.push(constants::DEBUG_LOG_FILE);
 
         let mut log_file = OpenOptions::new()
             .create(true)
-            .write(true)
-            .truncate(true)
+            .append(true)
             .open(&log_path)?;
 
         writeln!(log_file, "=== OpenCV Video Decoder Initialization ===")?;

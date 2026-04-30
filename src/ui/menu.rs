@@ -17,7 +17,13 @@ pub fn run_menu() -> Result<Option<MenuSelection>> {
     let mut app = MenuApp::load()?;
 
     if app.video_files.is_empty() {
-        eprintln!("assets/video (또는 assets/vidio) 디렉토리에 비디오 파일이 없습니다.");
+        let assets_dir = crate::utils::runtime::detect().assets_dir;
+        let message = format!(
+            "{} 아래 video (또는 vidio) 디렉토리에 비디오 파일이 없습니다.",
+            assets_dir.display()
+        );
+        crate::utils::logger::error(&message);
+        eprintln!("{}", message);
         return Ok(None);
     }
 

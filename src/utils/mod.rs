@@ -3,5 +3,6 @@ pub mod file_utils;
 pub mod logger;
 pub mod memory;
 pub mod platform;
+pub mod runtime;
 pub mod terminal_control;
 pub mod time_utils;

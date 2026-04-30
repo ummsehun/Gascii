@@ -25,11 +25,17 @@ mod tests {
 
     #[test]
     fn ascii_is_ansi_ascii() {
-        assert_eq!(ActiveRenderBackend::for_mode(DisplayMode::Ascii), ActiveRenderBackend::AnsiAscii);
+        assert_eq!(
+            ActiveRenderBackend::for_mode(DisplayMode::Ascii),
+            ActiveRenderBackend::AnsiAscii
+        );
     }
 
     #[test]
     fn rgb_is_ansi_rgb() {
-        assert_eq!(ActiveRenderBackend::for_mode(DisplayMode::Rgb), ActiveRenderBackend::AnsiRgb);
+        assert_eq!(
+            ActiveRenderBackend::for_mode(DisplayMode::Rgb),
+            ActiveRenderBackend::AnsiRgb
+        );
     }
 }

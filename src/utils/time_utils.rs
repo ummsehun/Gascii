@@ -8,13 +8,15 @@ pub struct Timer {
 #[allow(dead_code)]
 impl Timer {
     pub fn new() -> Self {
-        Self { start: Instant::now() }
+        Self {
+            start: Instant::now(),
+        }
     }
 
     pub fn elapsed_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
     }
-    
+
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }

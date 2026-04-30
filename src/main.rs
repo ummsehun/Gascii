@@ -18,7 +18,7 @@ use crate::renderer::{DisplayMode, TruecolorPolicy};
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -115,7 +115,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    match &cli.command {
+    match cli.command.as_ref().unwrap_or(&Commands::Menu) {
         Commands::Extract {
             input,
             output_dir,

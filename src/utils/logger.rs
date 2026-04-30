@@ -1,10 +1,10 @@
 use crate::shared::constants;
+use crate::utils::runtime::RuntimeMode;
 use lazy_static::lazy_static;
 use std::backtrace::Backtrace;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::panic;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 #[derive(Clone)]
@@ -24,11 +24,11 @@ fn append_line(path: &str, line: &str) {
 }
 
 pub fn init() {
-    let mut error_path = std::env::current_dir().unwrap_or_default();
-    error_path.push(constants::ERROR_LOG_FILE);
+    let runtime = crate::utils::runtime::detect();
+    let _ = fs::create_dir_all(&runtime.log_dir);
 
-    let mut debug_path = PathBuf::from(&error_path);
-    debug_path.set_file_name(constants::DEBUG_LOG_FILE);
+    let error_path = runtime.log_dir.join(constants::ERROR_LOG_FILE);
+    let debug_path = runtime.log_dir.join(constants::DEBUG_LOG_FILE);
 
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
@@ -46,6 +46,31 @@ pub fn init() {
         .open(&debug_path)
     {
         let _ = writeln!(file, "=== Debug Log Started: {} ===", chrono::Local::now());
+        let mode = match runtime.mode {
+            RuntimeMode::Development => "development",
+            RuntimeMode::Production => "production",
+        };
+        let _ = writeln!(file, "runtime_mode={}", mode);
+        let _ = writeln!(
+            file,
+            "exe_path={}",
+            runtime
+                .exe_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        );
+        let _ = writeln!(
+            file,
+            "package_root={}",
+            runtime
+                .package_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        );
+        let _ = writeln!(file, "assets_dir={}", runtime.assets_dir.display());
+        let _ = writeln!(file, "log_dir={}", runtime.log_dir.display());
     }
 
     let paths = LoggerPaths {

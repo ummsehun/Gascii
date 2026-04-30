@@ -265,15 +265,16 @@ pub(super) fn display_name(path: &Path) -> String {
 }
 
 fn scan_video_files() -> Result<Vec<PathBuf>> {
+    let assets_dir = crate::utils::runtime::detect().assets_dir;
     let Some(video_dir) = constants::VIDEO_DIR_CANDIDATES
         .iter()
-        .map(Path::new)
+        .map(|candidate| assets_dir.join(candidate.strip_prefix("assets/").unwrap_or(candidate)))
         .find(|dir| dir.exists())
     else {
         return Ok(Vec::new());
     };
 
-    let mut video_files: Vec<PathBuf> = fs::read_dir(video_dir)
+    let mut video_files: Vec<PathBuf> = fs::read_dir(&video_dir)
         .with_context(|| format!("failed to read {}", video_dir.display()))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
@@ -285,12 +286,17 @@ fn scan_video_files() -> Result<Vec<PathBuf>> {
 }
 
 fn scan_audio_files() -> Result<Vec<PathBuf>> {
-    let audio_dir = Path::new(constants::AUDIO_DIR);
+    let assets_dir = crate::utils::runtime::detect().assets_dir;
+    let audio_dir = assets_dir.join(
+        constants::AUDIO_DIR
+            .strip_prefix("assets/")
+            .unwrap_or(constants::AUDIO_DIR),
+    );
     if !audio_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let mut audio_files: Vec<PathBuf> = fs::read_dir(audio_dir)
+    let mut audio_files: Vec<PathBuf> = fs::read_dir(&audio_dir)
         .with_context(|| format!("failed to read {}", audio_dir.display()))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
@@ -307,7 +313,9 @@ fn has_allowed_extension(path: &Path, allowed: &[&str]) -> bool {
     };
 
     let ext = ext.to_ascii_lowercase();
-    allowed.iter().any(|allowed_ext| *allowed_ext == ext.as_str())
+    allowed
+        .iter()
+        .any(|allowed_ext| *allowed_ext == ext.as_str())
 }
 
 #[cfg(test)]

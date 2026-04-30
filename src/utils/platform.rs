@@ -362,10 +362,7 @@ fn detect_terminal_family(environment: TerminalEnvironment<'_>) -> TerminalFamil
         .unwrap_or_default()
         .to_ascii_lowercase();
     let term = environment.term.unwrap_or_default().to_ascii_lowercase();
-    let comspec = environment
-        .comspec
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let comspec = environment.comspec.unwrap_or_default().to_ascii_lowercase();
 
     if has_value(environment.wt_session) {
         TerminalFamily::WindowsTerminal
