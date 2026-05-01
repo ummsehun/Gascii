@@ -13,7 +13,18 @@ env:
   GASCII_ASSETS_URL: ${{ vars.GASCII_ASSETS_URL || secrets.GASCII_ASSETS_URL }}
 
 jobs:
+  validate-release-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate asset archive URL
+        run: |
+          if [ -z "${GASCII_ASSETS_URL}" ]; then
+            echo "::error title=Missing GASCII_ASSETS_URL::Set repository variable or secret GASCII_ASSETS_URL to a downloadable gascii-assets.zip URL containing assets/audio and assets/video."
+            exit 1
+          fi
+
   build-linux:
+    needs: validate-release-inputs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +101,7 @@ jobs:
           path: dist/*.tar.gz
 
   build-windows:
+    needs: validate-release-inputs
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,6 +200,7 @@ jobs:
           path: dist/*.zip
 
   build-macos-arm64:
+    needs: validate-release-inputs
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
