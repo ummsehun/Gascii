@@ -16,11 +16,12 @@ jobs:
   validate-release-inputs:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate asset archive URL
+      - name: Validate release inputs
         run: |
           if [ -z "${GASCII_ASSETS_URL}" ]; then
-            echo "::error title=Missing GASCII_ASSETS_URL::Set repository variable or secret GASCII_ASSETS_URL to a downloadable gascii-assets.zip URL containing assets/audio and assets/video."
-            exit 1
+            echo "GASCII_ASSETS_URL is not set. Release packages will include empty assets/audio and assets/video directories."
+          else
+            echo "GASCII_ASSETS_URL is set. Release packages will include assets from the downloaded archive."
           fi
 
   build-linux:
@@ -46,14 +47,16 @@ jobs:
         run: cargo build --release --verbose
       - name: Test
         run: cargo test --verbose
-      - name: Download assets
+      - name: Prepare assets
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eux
-          test -n "${GASCII_ASSETS_URL}" || (echo "GASCII_ASSETS_URL is required for release packaging" && exit 1)
           mkdir -p release-assets
-          curl -L "${GASCII_ASSETS_URL}" -o gascii-assets.zip
-          unzip -q gascii-assets.zip -d release-assets
+          if [ -n "${GASCII_ASSETS_URL}" ]; then
+            curl -L "${GASCII_ASSETS_URL}" -o gascii-assets.zip
+            unzip -q gascii-assets.zip -d release-assets
+          fi
+          mkdir -p release-assets/assets/video release-assets/assets/audio
           test -d release-assets/assets/video
           test -d release-assets/assets/audio
       - name: Package
@@ -148,16 +151,17 @@ jobs:
         run: cargo build --release --verbose
       - name: Test
         run: cargo test --verbose
-      - name: Download assets
+      - name: Prepare assets
         if: startsWith(github.ref, 'refs/tags/')
         shell: powershell
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:GASCII_ASSETS_URL)) {
-            throw "GASCII_ASSETS_URL is required for release packaging"
-          }
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
-          Invoke-WebRequest -Uri $env:GASCII_ASSETS_URL -OutFile "gascii-assets.zip"
-          Expand-Archive -Path "gascii-assets.zip" -DestinationPath "release-assets" -Force
+          if (![string]::IsNullOrWhiteSpace($env:GASCII_ASSETS_URL)) {
+            Invoke-WebRequest -Uri $env:GASCII_ASSETS_URL -OutFile "gascii-assets.zip"
+            Expand-Archive -Path "gascii-assets.zip" -DestinationPath "release-assets" -Force
+          }
+          New-Item -ItemType Directory -Force -Path "release-assets\assets\video" | Out-Null
+          New-Item -ItemType Directory -Force -Path "release-assets\assets\audio" | Out-Null
           if (!(Test-Path "release-assets\assets\video")) {
             throw "Asset archive must contain assets/video"
           }
@@ -220,14 +224,16 @@ jobs:
         run: cargo build --release --verbose
       - name: Test
         run: cargo test --verbose
-      - name: Download assets
+      - name: Prepare assets
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eux
-          test -n "${GASCII_ASSETS_URL}" || (echo "GASCII_ASSETS_URL is required for release packaging" && exit 1)
           mkdir -p release-assets
-          curl -L "${GASCII_ASSETS_URL}" -o gascii-assets.zip
-          unzip -q gascii-assets.zip -d release-assets
+          if [ -n "${GASCII_ASSETS_URL}" ]; then
+            curl -L "${GASCII_ASSETS_URL}" -o gascii-assets.zip
+            unzip -q gascii-assets.zip -d release-assets
+          fi
+          mkdir -p release-assets/assets/video release-assets/assets/audio
           test -d release-assets/assets/video
           test -d release-assets/assets/audio
       - name: Package
