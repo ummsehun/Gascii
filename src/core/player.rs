@@ -46,6 +46,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         config.truecolor_policy,
     )?;
     let active_backend = display.active_backend();
+    let pixel_aspect_correction = DisplayManager::render_pixel_aspect_correction(active_backend);
     let budget_policy =
         FrameBudgetPolicy::for_backend(config.display_mode, active_backend, config.quality);
     let (term_cols, term_rows) = DisplayManager::current_terminal_size_chars()?;
@@ -54,7 +55,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
     let decoder = VideoDecoder::new(
         config.video_path.to_string_lossy().as_ref(),
         target.clone(),
-        ScaleMode::Fit,
+        scale_mode_for_viewport(config.viewport_mode),
     )?;
     let source_aspect = decoder.source_aspect_ratio();
     let mut layout = ViewportLayout::calculate(
@@ -65,6 +66,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         config.requested_height,
         budget_policy,
         source_aspect,
+        pixel_aspect_correction,
     );
     {
         let mut guard = target
@@ -147,6 +149,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
                         cols,
                         rows,
                         source_aspect,
+                        pixel_aspect_correction,
                     )?;
                 }
                 _ => {}
@@ -170,6 +173,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
                     current_size.0,
                     current_size.1,
                     source_aspect,
+                    pixel_aspect_correction,
                 )?;
             }
             last_resize_probe = Instant::now();
@@ -316,6 +320,7 @@ fn resize_playback(
     cols: u16,
     rows: u16,
     source_aspect: f64,
+    pixel_aspect_correction: f64,
 ) -> Result<()> {
     handle_resize(
         config.viewport_mode,
@@ -329,6 +334,7 @@ fn resize_playback(
         cols,
         rows,
         source_aspect,
+        pixel_aspect_correction,
     )
 }
 
@@ -351,6 +357,13 @@ fn queue_capacity_for_frame_bytes(frame_bytes: usize) -> usize {
 
     let budgeted = DEFAULT_QUEUE_MEMORY_BUDGET / frame_bytes;
     budgeted.clamp(MIN_QUEUE_CAPACITY, DEFAULT_QUEUE_CAPACITY)
+}
+
+fn scale_mode_for_viewport(viewport_mode: ViewportMode) -> ScaleMode {
+    match viewport_mode {
+        ViewportMode::Fullscreen => ScaleMode::CropToFill,
+        ViewportMode::CinemaScope => ScaleMode::Fit,
+    }
 }
 
 #[cfg(test)]

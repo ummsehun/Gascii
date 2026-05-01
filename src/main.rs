@@ -155,7 +155,7 @@ fn main() -> Result<()> {
                 viewport_mode: if *fill {
                     crate::core::player::ViewportMode::Fullscreen
                 } else {
-                    crate::core::player::ViewportMode::Cinema16x9
+                    crate::core::player::ViewportMode::CinemaScope
                 },
                 quality: *quality,
                 truecolor_policy: *truecolor_policy,

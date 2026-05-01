@@ -143,7 +143,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &MenuApp) {
     };
     let viewport = match app.selected_viewport_mode() {
         ViewportMode::Fullscreen => "전체 화면",
-        ViewportMode::Cinema16x9 => "영화관 화면 (16:9)",
+        ViewportMode::CinemaScope => "시네마스코프 (2.39:1)",
     };
     let quality = match app.selected_quality() {
         RenderQuality::Full => "Full",

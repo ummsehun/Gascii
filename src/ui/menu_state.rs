@@ -245,7 +245,7 @@ impl MenuApp {
         if self.screen_index == 0 {
             ViewportMode::Fullscreen
         } else {
-            ViewportMode::Cinema16x9
+            ViewportMode::CinemaScope
         }
     }
 

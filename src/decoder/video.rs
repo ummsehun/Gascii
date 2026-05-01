@@ -203,14 +203,7 @@ impl VideoDecoder {
         let orig_w = self.frame.cols() as u32;
         let orig_h = self.frame.rows() as u32;
 
-        let scale_w = target.pixel_width as f64 / orig_w as f64;
-        let scale_h = target.pixel_height as f64 / orig_h as f64;
-        let scale = match self.scale_mode {
-            ScaleMode::CropToFill => scale_w.max(scale_h),
-            ScaleMode::Fit => scale_w.min(scale_h),
-        };
-        let new_w = ((orig_w as f64 * scale).round() as u32).max(1);
-        let new_h = ((orig_h as f64 * scale).round() as u32).max(1);
+        let (new_w, new_h) = scaled_dimensions(orig_w, orig_h, target, self.scale_mode);
 
         if !self.frame.is_continuous() {
             return Err(anyhow!("Frame is not continuous"));
@@ -240,46 +233,7 @@ impl VideoDecoder {
         buffer.clear();
         buffer.resize(canvas_len, 0);
 
-        if new_w > target.pixel_width || new_h > target.pixel_height {
-            let crop_x = ((new_w - target.pixel_width) / 2) as usize;
-            let crop_y = ((new_h - target.pixel_height) / 2) as usize;
-
-            for y in 0..target.pixel_height {
-                let src_y = crop_y + y as usize;
-                let src_offset = (src_y * new_w as usize + crop_x) * 3;
-                let dst_offset = (y * target.pixel_width) as usize * 3;
-                let copy_len =
-                    (target.pixel_width as usize * 3).min(dst_image.buffer().len() - src_offset);
-
-                if src_offset + copy_len <= dst_image.buffer().len()
-                    && dst_offset + copy_len <= buffer.len()
-                {
-                    copy_bgr_to_rgb(
-                        &dst_image.buffer()[src_offset..src_offset + copy_len],
-                        &mut buffer[dst_offset..dst_offset + copy_len],
-                    );
-                }
-            }
-        } else {
-            let x_off = ((target.pixel_width - new_w) / 2) as usize;
-            let y_off = ((target.pixel_height - new_h) / 2) as usize;
-
-            for y in 0..new_h {
-                let src_offset = (y * new_w) as usize * 3;
-                let dst_y = y_off + y as usize;
-                let dst_offset = (dst_y * target.pixel_width as usize + x_off) * 3;
-                let copy_len = (new_w as usize * 3).min(dst_image.buffer().len() - src_offset);
-
-                if src_offset + copy_len <= dst_image.buffer().len()
-                    && dst_offset + copy_len <= buffer.len()
-                {
-                    copy_bgr_to_rgb(
-                        &dst_image.buffer()[src_offset..src_offset + copy_len],
-                        &mut buffer[dst_offset..dst_offset + copy_len],
-                    );
-                }
-            }
-        }
+        blit_resized_to_canvas(dst_image.buffer(), new_w, new_h, target, buffer);
 
         let letterbox_time = start_letterbox.elapsed();
 
@@ -366,6 +320,73 @@ fn open_capture(path: &str, log_file: &mut std::fs::File) -> Result<videoio::Vid
                 error
             )?;
             videoio::VideoCapture::from_file(path, videoio::CAP_ANY).map_err(Into::into)
+        }
+    }
+}
+
+fn scaled_dimensions(
+    orig_w: u32,
+    orig_h: u32,
+    target: RenderTarget,
+    scale_mode: ScaleMode,
+) -> (u32, u32) {
+    let orig_w = orig_w.max(1);
+    let orig_h = orig_h.max(1);
+    let scale_w = target.pixel_width as f64 / orig_w as f64;
+    let scale_h = target.pixel_height as f64 / orig_h as f64;
+    let scale = match scale_mode {
+        ScaleMode::CropToFill => scale_w.max(scale_h),
+        ScaleMode::Fit => scale_w.min(scale_h),
+    };
+
+    match scale_mode {
+        ScaleMode::CropToFill => (
+            ((orig_w as f64 * scale).ceil() as u32)
+                .max(target.pixel_width)
+                .max(1),
+            ((orig_h as f64 * scale).ceil() as u32)
+                .max(target.pixel_height)
+                .max(1),
+        ),
+        ScaleMode::Fit => (
+            ((orig_w as f64 * scale).floor() as u32)
+                .min(target.pixel_width)
+                .max(1),
+            ((orig_h as f64 * scale).floor() as u32)
+                .min(target.pixel_height)
+                .max(1),
+        ),
+    }
+}
+
+fn blit_resized_to_canvas(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    target: RenderTarget,
+    dst: &mut [u8],
+) {
+    let visible_width = src_width.min(target.pixel_width);
+    let visible_height = src_height.min(target.pixel_height);
+    if visible_width == 0 || visible_height == 0 {
+        return;
+    }
+
+    let src_x = src_width.saturating_sub(visible_width) / 2;
+    let src_y = src_height.saturating_sub(visible_height) / 2;
+    let dst_x = target.pixel_width.saturating_sub(visible_width) / 2;
+    let dst_y = target.pixel_height.saturating_sub(visible_height) / 2;
+    let copy_len = visible_width as usize * 3;
+
+    for row in 0..visible_height {
+        let src_offset = ((src_y + row) * src_width + src_x) as usize * 3;
+        let dst_offset = ((dst_y + row) * target.pixel_width + dst_x) as usize * 3;
+
+        if src_offset + copy_len <= src.len() && dst_offset + copy_len <= dst.len() {
+            copy_bgr_to_rgb(
+                &src[src_offset..src_offset + copy_len],
+                &mut dst[dst_offset..dst_offset + copy_len],
+            );
         }
     }
 }
@@ -477,5 +498,23 @@ mod tests {
         let mut stats = SlowFrameStats::new(start);
 
         assert!(stats.flush_if_due(start + Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn crop_to_fill_scaled_dimensions_cover_target_after_rounding() {
+        let target = RenderTarget::new(101, 58);
+        let (width, height) = scaled_dimensions(1920, 1080, target, ScaleMode::CropToFill);
+
+        assert!(width >= target.pixel_width);
+        assert!(height >= target.pixel_height);
+    }
+
+    #[test]
+    fn fit_scaled_dimensions_never_exceed_target_after_rounding() {
+        let target = RenderTarget::new(101, 58);
+        let (width, height) = scaled_dimensions(1920, 1080, target, ScaleMode::Fit);
+
+        assert!(width <= target.pixel_width);
+        assert!(height <= target.pixel_height);
     }
 }

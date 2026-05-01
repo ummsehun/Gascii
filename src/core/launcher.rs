@@ -16,7 +16,7 @@ pub fn run() -> Result<()> {
     };
     let viewport = match selection.viewport_mode {
         ViewportMode::Fullscreen => "fullscreen",
-        ViewportMode::Cinema16x9 => "cinema-16:9",
+        ViewportMode::CinemaScope => "cinemascope",
     };
 
     crate::utils::logger::info(&format!(

@@ -54,6 +54,7 @@ pub(crate) fn handle_resize(
     cols: u16,
     rows: u16,
     source_aspect: f64,
+    pixel_aspect_correction: f64,
 ) -> Result<()> {
     let next_layout = ViewportLayout::calculate(
         cols,
@@ -63,6 +64,7 @@ pub(crate) fn handle_resize(
         requested_height,
         budget_policy,
         source_aspect,
+        pixel_aspect_correction,
     );
 
     let recentered = (*layout).recentered_for_terminal(cols, rows);

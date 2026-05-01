@@ -162,6 +162,25 @@ impl DisplayManager {
         self.active_backend
     }
 
+    pub fn render_pixel_aspect_correction(backend: ActiveRenderBackend) -> f64 {
+        if let Ok(value) = std::env::var("GASCII_RENDER_ASPECT_CORRECTION") {
+            if let Ok(parsed) = value.parse::<f64>() {
+                if parsed.is_finite() && parsed > 0.0 {
+                    return parsed;
+                }
+            }
+        }
+
+        match backend {
+            ActiveRenderBackend::AnsiRgb => 1.0,
+            ActiveRenderBackend::AnsiAscii => std::env::var("GASCII_ASCII_PIXEL_ASPECT")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(0.88),
+        }
+    }
+
     fn initialize_terminal(&mut self) -> Result<()> {
         terminal::enable_raw_mode()?;
         self.stdout.execute(EnterAlternateScreen)?;

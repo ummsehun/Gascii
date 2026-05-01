@@ -1,4 +1,4 @@
-use crate::core::viewport::{fit_aspect_16_9, make_even, ViewportMode};
+use crate::core::viewport::{make_even, ViewportMode};
 use crate::renderer::{ActiveRenderBackend, DisplayMode};
 use std::time::Duration;
 
@@ -60,7 +60,7 @@ impl FrameBudgetPolicy {
         if self.max_render_cells == u32::MAX {
             return match mode {
                 ViewportMode::Fullscreen => (width.max(1), make_even(height.max(2))),
-                ViewportMode::Cinema16x9 => fit_aspect_16_9(width, height),
+                ViewportMode::CinemaScope => (width.max(1), make_even(height.max(2))),
             };
         }
 
@@ -77,7 +77,7 @@ impl FrameBudgetPolicy {
 
         match mode {
             ViewportMode::Fullscreen => (scaled_width, scaled_height),
-            ViewportMode::Cinema16x9 => fit_aspect_16_9(scaled_width, scaled_height),
+            ViewportMode::CinemaScope => (scaled_width, scaled_height),
         }
     }
 }
@@ -101,6 +101,7 @@ mod tests {
                 RenderQuality::Balanced,
             ),
             16.0 / 9.0,
+            1.0,
         );
         let cells = layout.pixel_width * (layout.pixel_height / 2);
         assert!(cells <= 24_000);
@@ -120,6 +121,7 @@ mod tests {
                 RenderQuality::Performance,
             ),
             16.0 / 9.0,
+            1.0,
         );
         let cells = layout.pixel_width * (layout.pixel_height / 2);
         assert!(cells <= 18_000);

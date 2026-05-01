@@ -25,8 +25,8 @@ pub const MENU_QUALITY_LABELS: &[&str] = &[
     "Balanced (큰 화면 성능 보호)",
     "Performance (FPS 우선)",
 ];
-pub const MENU_SCREEN_MODE_LABELS: &[&str] = &["전체 화면 (꽉 차게)", "영화관 화면 (16:9)"];
+pub const MENU_SCREEN_MODE_LABELS: &[&str] = &["전체 화면 (꽉 차게)", "시네마스코프 (2.39:1)"];
 pub const MENU_NO_AUDIO_LABEL: &str = "오디오 없이 재생";
 
 pub const WINDOWED_COLUMNS: u16 = 240;
-pub const WINDOWED_ROWS: u16 = 68;
+pub const WINDOWED_ROWS: u16 = 50;

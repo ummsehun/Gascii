@@ -4,8 +4,10 @@ use crate::renderer::RenderViewport;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportMode {
     Fullscreen,
-    Cinema16x9,
+    CinemaScope,
 }
+
+pub(crate) const CINEMASCOPE_ASPECT: f64 = 2.39;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewportLayout {
@@ -26,6 +28,7 @@ impl ViewportLayout {
         requested_height: Option<u32>,
         budget_policy: FrameBudgetPolicy,
         source_aspect: f64,
+        pixel_aspect_correction: f64,
     ) -> Self {
         let terminal_cols = terminal_cols.max(1);
         let terminal_rows = terminal_rows.max(1);
@@ -34,27 +37,28 @@ impl ViewportLayout {
         let max_pixel_height = (terminal_rows as u32).saturating_mul(2).max(2);
 
         let (pixel_width, pixel_height) = match viewport_mode {
-            ViewportMode::Fullscreen => {
-                let width = requested_width
+            ViewportMode::Fullscreen => budget_policy.apply_to_dimensions(
+                requested_width
                     .map(|value| value.min(max_pixel_width).max(1))
-                    .unwrap_or(max_pixel_width);
-                let height = requested_height
+                    .unwrap_or(max_pixel_width),
+                requested_height
                     .map(|value| value.min(max_pixel_height).max(2))
-                    .unwrap_or(max_pixel_height);
-                let (width, height) = fit_aspect(width, height, source_aspect);
-                budget_policy.apply_to_dimensions(width, height, viewport_mode)
-            }
-            ViewportMode::Cinema16x9 => {
+                    .unwrap_or(max_pixel_height),
+                viewport_mode,
+            ),
+            ViewportMode::CinemaScope => {
+                let cinema_pixel_aspect =
+                    corrected_pixel_aspect(CINEMASCOPE_ASPECT, pixel_aspect_correction);
                 let fitted_width = max_pixel_width;
                 let fitted_height = make_even(
-                    ((fitted_width as f64 / (16.0 / 9.0)).floor() as u32)
+                    ((fitted_width as f64 / cinema_pixel_aspect).floor() as u32)
                         .min(max_pixel_height)
                         .max(2),
                 );
 
                 let (bounded_width, bounded_height) = if fitted_height > max_pixel_height {
                     let height = max_pixel_height;
-                    let width = ((height as f64 * (16.0 / 9.0)).floor() as u32)
+                    let width = ((height as f64 * cinema_pixel_aspect).floor() as u32)
                         .min(max_pixel_width)
                         .max(1);
                     (width, height)
@@ -69,7 +73,7 @@ impl ViewportLayout {
                     .map(|value| value.min(bounded_height).max(2))
                     .unwrap_or(bounded_height);
 
-                let (width, height) = fit_aspect_16_9(limit_width, limit_height);
+                let (width, height) = fit_aspect(limit_width, limit_height, cinema_pixel_aspect);
                 budget_policy.apply_to_dimensions(width, height, viewport_mode)
             }
         };
@@ -116,8 +120,13 @@ impl ViewportLayout {
     }
 }
 
-pub(crate) fn fit_aspect_16_9(max_width: u32, max_height: u32) -> (u32, u32) {
-    fit_aspect(max_width, max_height, 16.0 / 9.0)
+pub(crate) fn corrected_pixel_aspect(visual_aspect: f64, pixel_aspect_correction: f64) -> f64 {
+    let correction = if pixel_aspect_correction.is_finite() && pixel_aspect_correction > 0.0 {
+        pixel_aspect_correction
+    } else {
+        1.0
+    };
+    (visual_aspect / correction).max(0.1)
 }
 
 pub(crate) fn fit_aspect(max_width: u32, max_height: u32, aspect: f64) -> (u32, u32) {
@@ -126,7 +135,7 @@ pub(crate) fn fit_aspect(max_width: u32, max_height: u32, aspect: f64) -> (u32, 
     let aspect = if aspect.is_finite() && aspect > 0.0 {
         aspect
     } else {
-        16.0 / 9.0
+        CINEMASCOPE_ASPECT
     };
     let width_from_height = ((max_height as f64) * aspect).floor() as u32;
 
@@ -155,11 +164,11 @@ mod tests {
     use crate::renderer::{ActiveRenderBackend, DisplayMode};
 
     #[test]
-    fn cinema_layout_keeps_16_9_ratio() {
+    fn cinema_layout_keeps_cinemascope_ratio() {
         let layout = ViewportLayout::calculate(
             240,
             68,
-            ViewportMode::Cinema16x9,
+            ViewportMode::CinemaScope,
             None,
             None,
             FrameBudgetPolicy::for_backend(
@@ -168,13 +177,36 @@ mod tests {
                 RenderQuality::Full,
             ),
             16.0 / 9.0,
+            1.0,
         );
         let ratio = layout.pixel_width as f64 / layout.pixel_height as f64;
-        assert!((ratio - (16.0 / 9.0)).abs() < 0.05);
+        assert!((ratio - CINEMASCOPE_ASPECT).abs() < 0.05);
     }
 
     #[test]
-    fn fullscreen_layout_uses_requested_limits() {
+    fn cinema_layout_compensates_for_narrow_ascii_glyphs() {
+        let correction = 0.5;
+        let layout = ViewportLayout::calculate(
+            240,
+            68,
+            ViewportMode::CinemaScope,
+            None,
+            None,
+            FrameBudgetPolicy::for_backend(
+                DisplayMode::Ascii,
+                ActiveRenderBackend::AnsiAscii,
+                RenderQuality::Full,
+            ),
+            16.0 / 9.0,
+            correction,
+        );
+
+        let visual_ratio = (layout.pixel_width as f64 / layout.pixel_height as f64) * correction;
+        assert!((visual_ratio - CINEMASCOPE_ASPECT).abs() < 0.05);
+    }
+
+    #[test]
+    fn fullscreen_layout_uses_requested_limits_without_preserving_aspect() {
         let layout = ViewportLayout::calculate(
             240,
             68,
@@ -187,13 +219,14 @@ mod tests {
                 RenderQuality::Full,
             ),
             16.0 / 9.0,
+            1.0,
         );
         assert_eq!(layout.pixel_width, 120);
-        assert_eq!(layout.pixel_height, 66);
+        assert_eq!(layout.pixel_height, 80);
     }
 
     #[test]
-    fn ansi_rgb_uses_full_source_aspect_viewport_resolution() {
+    fn fullscreen_layout_uses_entire_terminal_canvas() {
         let layout = ViewportLayout::calculate(
             320,
             120,
@@ -206,13 +239,16 @@ mod tests {
                 RenderQuality::Full,
             ),
             16.0 / 9.0,
+            1.0,
         );
         assert_eq!(layout.pixel_width, 320);
-        assert_eq!(layout.pixel_height, 180);
+        assert_eq!(layout.pixel_height, 240);
+        assert_eq!(layout.offset_x, 0);
+        assert_eq!(layout.offset_y, 0);
     }
 
     #[test]
-    fn fullscreen_layout_preserves_non_16_9_source_aspect() {
+    fn fullscreen_layout_ignores_non_16_9_source_aspect() {
         let layout = ViewportLayout::calculate(
             320,
             120,
@@ -225,6 +261,7 @@ mod tests {
                 RenderQuality::Full,
             ),
             4.0 / 3.0,
+            1.0,
         );
         assert_eq!(layout.pixel_width, 320);
         assert_eq!(layout.pixel_height, 240);
