@@ -10,22 +10,9 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  GASCII_ASSETS_URL: ${{ vars.GASCII_ASSETS_URL || secrets.GASCII_ASSETS_URL }}
 
 jobs:
-  validate-release-inputs:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate release inputs
-        run: |
-          if [ -z "${GASCII_ASSETS_URL}" ]; then
-            echo "GASCII_ASSETS_URL is not set. Release packages will include empty assets/audio and assets/video directories."
-          else
-            echo "GASCII_ASSETS_URL is set. Release packages will include assets from the downloaded archive."
-          fi
-
   build-linux:
-    needs: validate-release-inputs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,11 +38,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eux
-          mkdir -p release-assets
-          if [ -n "${GASCII_ASSETS_URL}" ]; then
-            curl -L "${GASCII_ASSETS_URL}" -o gascii-assets.zip
-            unzip -q gascii-assets.zip -d release-assets
-          fi
           mkdir -p release-assets/assets/video release-assets/assets/audio
           test -d release-assets/assets/video
           test -d release-assets/assets/audio
@@ -104,24 +86,16 @@ jobs:
           path: dist/*.tar.gz
 
   build-windows:
-    needs: validate-release-inputs
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Cache vcpkg binaries
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.workspace }}\vcpkg-cache
-          key: vcpkg-windows-${{ hashFiles('Cargo.lock', '.github/workflows/ci.yml') }}
-          restore-keys: |
-            vcpkg-windows-
       - name: Validate release tag
         shell: powershell
         run: |
           if ($env:GITHUB_REF_NAME -notmatch '^v[0-9]+\.[0-9]+(\.[0-9]+)?$') {
             throw "Release tags must look like v0.1 or v0.1.2"
           }
-      - name: Install LLVM, vcpkg, and OpenCV
+      - name: Install LLVM and OpenCV
         shell: powershell
         run: |
           $llvmBin = Join-Path $env:ProgramFiles "LLVM\bin"
@@ -132,17 +106,52 @@ jobs:
             throw "libclang.dll was not found in $llvmBin"
           }
 
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_WORKSPACE\vcpkg-cache" | Out-Null
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git $env:RUNNER_WORKSPACE\vcpkg
-          & $env:RUNNER_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
-          $env:VCPKG_BINARY_SOURCES = "clear;files,$env:RUNNER_WORKSPACE\vcpkg-cache,readwrite"
-          & $env:RUNNER_WORKSPACE\vcpkg\vcpkg.exe install opencv4:x64-windows
-          echo "VCPKG_ROOT=$env:RUNNER_WORKSPACE\vcpkg" >> $env:GITHUB_ENV
-          echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
-          echo "VCPKGRS_TRIPLET=x64-windows" >> $env:GITHUB_ENV
-          echo "VCPKG_BINARY_SOURCES=clear;files,$env:RUNNER_WORKSPACE\vcpkg-cache,readwrite" >> $env:GITHUB_ENV
-          echo "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
-          echo "$llvmBin" >> $env:GITHUB_PATH
+          choco install opencv -y --no-progress --package-parameters "'/InstallationPath:C:\tools /Environment'"
+
+          $searchRoots = @(
+            "C:\tools",
+            "$env:ChocolateyInstall\lib"
+          ) | Where-Object { Test-Path $_ }
+
+          $opencv2Dir = Get-ChildItem -Path $searchRoots -Recurse -Directory -Filter "opencv2" -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName "core\version.hpp") } |
+            Select-Object -First 1
+          if ($null -eq $opencv2Dir) {
+            throw "Could not find OpenCV headers after Chocolatey install"
+          }
+          $opencvIncludeDir = Split-Path $opencv2Dir.FullName -Parent
+
+          $opencvLib = Get-ChildItem -Path $searchRoots -Recurse -File -Filter "opencv_world*.lib" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x64\\" } |
+            Sort-Object FullName |
+            Select-Object -First 1
+          if ($null -eq $opencvLib) {
+            throw "Could not find opencv_world*.lib after Chocolatey install"
+          }
+          $opencvLinkDir = $opencvLib.DirectoryName
+          $opencvLinkLib = [System.IO.Path]::GetFileNameWithoutExtension($opencvLib.Name)
+
+          $opencvDll = Get-ChildItem -Path $searchRoots -Recurse -File -Filter "$opencvLinkLib.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x64\\" } |
+            Sort-Object FullName |
+            Select-Object -First 1
+          if ($null -eq $opencvDll) {
+            throw "Could not find $opencvLinkLib.dll after Chocolatey install"
+          }
+          $opencvDllDir = $opencvDll.DirectoryName
+
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvmBin"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENCV_INCLUDE_PATHS=$opencvIncludeDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENCV_LINK_PATHS=$opencvLinkDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENCV_LINK_LIBS=$opencvLinkLib"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENCV_DLL_DIR=$opencvDllDir"
+          Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
+          Add-Content -Path $env:GITHUB_PATH -Value $opencvDllDir
+
+          Write-Host "OpenCV include: $opencvIncludeDir"
+          Write-Host "OpenCV link dir: $opencvLinkDir"
+          Write-Host "OpenCV link lib: $opencvLinkLib"
+          Write-Host "OpenCV DLL dir: $opencvDllDir"
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build
@@ -156,10 +165,6 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
-          if (![string]::IsNullOrWhiteSpace($env:GASCII_ASSETS_URL)) {
-            Invoke-WebRequest -Uri $env:GASCII_ASSETS_URL -OutFile "gascii-assets.zip"
-            Expand-Archive -Path "gascii-assets.zip" -DestinationPath "release-assets" -Force
-          }
           New-Item -ItemType Directory -Force -Path "release-assets\assets\video" | Out-Null
           New-Item -ItemType Directory -Force -Path "release-assets\assets\audio" | Out-Null
           if (!(Test-Path "release-assets\assets\video")) {
@@ -178,7 +183,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist\$packageDir\logs" | Out-Null
           Copy-Item "release-assets\assets" "dist\$packageDir\assets" -Recurse
           Copy-Item "target\release\Gascii.exe" "dist\$packageDir\gascii.exe"
-          Copy-Item "$env:RUNNER_WORKSPACE\vcpkg\installed\x64-windows\bin\*.dll" "dist\$packageDir\" -ErrorAction SilentlyContinue
+          Copy-Item "$env:OPENCV_DLL_DIR\*.dll" "dist\$packageDir\" -ErrorAction Stop
           $manifest = @"
           {
             "id": "gascii",
@@ -204,7 +209,6 @@ jobs:
           path: dist/*.zip
 
   build-macos-arm64:
-    needs: validate-release-inputs
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -228,11 +232,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eux
-          mkdir -p release-assets
-          if [ -n "${GASCII_ASSETS_URL}" ]; then
-            curl -L "${GASCII_ASSETS_URL}" -o gascii-assets.zip
-            unzip -q gascii-assets.zip -d release-assets
-          fi
           mkdir -p release-assets/assets/video release-assets/assets/audio
           test -d release-assets/assets/video
           test -d release-assets/assets/audio
