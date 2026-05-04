@@ -200,6 +200,7 @@ jobs:
           }
           "@
           Set-Content -Path "dist\$packageDir\manifest.json" -Value $manifest
+          Add-Type -AssemblyName System.IO.Compression
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zipPath = "dist\$packageDir.zip"
           if (Test-Path $zipPath) {
