@@ -6,8 +6,13 @@ pub const DEBUG_LOG_FILE: &str = "debug.log";
 pub const VIDEO_DIR_CANDIDATES: &[&str] = &["assets/video", "assets/vidio"];
 pub const AUDIO_DIR: &str = "assets/audio";
 
-pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm"];
-pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "flac"];
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mkv", "avi", "mov", "webm", "flv", "wmv", "mpg", "mpeg", "3gp", "3g2", "ts",
+    "m2ts", "mts",
+];
+pub const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "wav", "wave", "m4a", "mp4", "aac", "flac", "ogg", "oga",
+];
 
 pub const MENU_LOGO: &[&str] = &[
     "   _____                _ _ ",

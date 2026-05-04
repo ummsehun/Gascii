@@ -282,14 +282,13 @@ mod windows_mci {
     }
 
     fn mci_device_type(path: &str) -> &'static str {
-        if path
+        match path
             .rsplit_once('.')
-            .map(|(_, ext)| ext.eq_ignore_ascii_case("wav"))
-            .unwrap_or(false)
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .as_deref()
         {
-            "waveaudio"
-        } else {
-            "mpegvideo"
+            Some("wav" | "wave") => "waveaudio",
+            _ => "mpegvideo",
         }
     }
 }
