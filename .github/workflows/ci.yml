@@ -200,7 +200,39 @@ jobs:
           }
           "@
           Set-Content -Path "dist\$packageDir\manifest.json" -Value $manifest
-          Compress-Archive -Path "dist\$packageDir" -DestinationPath "dist\$packageDir.zip" -Force
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zipPath = "dist\$packageDir.zip"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          $sourceRoot = (Resolve-Path "dist\$packageDir").Path
+          $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            Get-ChildItem -Path $sourceRoot -Directory -Recurse | ForEach-Object {
+              $relative = $_.FullName.Substring($sourceRoot.Length) -replace '^[\\/]+', ''
+              $entryName = "$packageDir/$($relative -replace '\\', '/')/"
+              $null = $zip.CreateEntry($entryName)
+            }
+
+            Get-ChildItem -Path $sourceRoot -File -Recurse | ForEach-Object {
+              $relative = $_.FullName.Substring($sourceRoot.Length) -replace '^[\\/]+', ''
+              $entryName = "$packageDir/$($relative -replace '\\', '/')"
+              $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entryName)
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $invalidEntry = $zip.Entries | Where-Object { $_.FullName.Contains('\') } | Select-Object -First 1
+            if ($null -ne $invalidEntry) {
+              throw "ZIP entry contains Windows path separators: $($invalidEntry.FullName)"
+            }
+          } finally {
+            $zip.Dispose()
+          }
       - name: Upload build artifact
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
