@@ -109,17 +109,7 @@ pub fn play(config: PlaybackConfig) -> Result<()> {
         pending_future = wait_for_resized_frame(receiver, layout.pixel_width, layout.pixel_height)?;
     }
 
-    let audio_manager = if config.audio_path.is_some() {
-        Some(AudioManager::new()?)
-    } else {
-        None
-    };
-    let clock_start = if let (Some(audio), Some(audio_path)) = (&audio_manager, &config.audio_path)
-    {
-        audio.play(audio_path.to_string_lossy().as_ref())?
-    } else {
-        Instant::now()
-    };
+    let (audio_manager, clock_start) = start_audio_or_fallback(config.audio_path.as_ref());
     let clock = MasterClock::from_start(clock_start);
 
     let mut stats = PlaybackStats::new();
@@ -342,6 +332,35 @@ fn audio_is_done(audio_manager: &Option<AudioManager>) -> bool {
     match audio_manager {
         Some(audio) => audio.is_finished().unwrap_or(true),
         None => true,
+    }
+}
+
+fn start_audio_or_fallback(audio_path: Option<&PathBuf>) -> (Option<AudioManager>, Instant) {
+    let Some(audio_path) = audio_path else {
+        return (None, Instant::now());
+    };
+
+    let mut audio = match AudioManager::new() {
+        Ok(audio) => audio,
+        Err(error) => {
+            crate::utils::logger::error(&format!(
+                "Audio disabled: failed to initialize output device: {}",
+                error
+            ));
+            return (None, Instant::now());
+        }
+    };
+
+    match audio.play(audio_path.to_string_lossy().as_ref()) {
+        Ok(clock_start) => (Some(audio), clock_start),
+        Err(error) => {
+            crate::utils::logger::error(&format!(
+                "Audio disabled: failed to play {}: {}",
+                audio_path.display(),
+                error
+            ));
+            (None, Instant::now())
+        }
     }
 }
 
